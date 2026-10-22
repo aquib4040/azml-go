@@ -1,0 +1,163 @@
+package modules
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"azml-go/types"
+	"azml-go/config"
+	"azml-go/helper/downloader"
+	"azml-go/helper/ext"
+	"azml-go/helper/telegram"
+	"azml-go/helper/uploader"
+
+	"github.com/gotd/td/tg"
+)
+
+type YtdlModule struct {
+	sender   *telegram.MessageSender
+	uploader *uploader.TelegramUploader
+	userMap  *types.SafeUserMap
+	taskMgr  *ext.TaskManager
+}
+
+func NewYtdlModule(sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap) *YtdlModule {
+	return &YtdlModule{
+		sender:   sender,
+		uploader: uploader,
+		userMap:  userMap,
+		taskMgr:  ext.GetTaskManager(),
+	}
+}
+
+func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
+	cfg := config.Get()
+
+	// Access control
+	if msgText, btn := ext.CheckingAccess(msg.UserID, false, cfg.BotToken, m.userMap); msgText != "" {
+		var markup tg.ReplyMarkupClass
+		if btn != nil {
+			markup = btn.BuildMenu(1)
+		}
+		_, _ = m.sender.SendMessage(ctx, peer, msgText, msg.MessageID, markup)
+		return
+	}
+
+	tokens := strings.Fields(msg.Text)
+	if len(tokens) <= 1 && (!msg.IsReply || msg.ReplyText == "") {
+		helpMsg := "<b>Send YouTube / media link to download!</b>\n" +
+			"<b>Usage:</b> <code>/ytdl [link] [quality]</code>\n" +
+			"<b>Examples:</b>\n" +
+			"<code>/ytdl https://youtu.be/...</code>\n" +
+			"<code>/ytdl https://youtu.be/... 720p</code>"
+		_, _ = m.sender.SendMessage(ctx, peer, helpMsg, msg.MessageID, nil)
+		return
+	}
+
+	link := ""
+	customQuality := ""
+	if len(tokens) > 1 {
+		link = tokens[1]
+	}
+	if len(tokens) > 2 {
+		customQuality = tokens[2]
+	}
+	if link == "" && msg.IsReply {
+		link = strings.TrimSpace(msg.ReplyText)
+	}
+
+	taskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(4)))
+	_ = os.MkdirAll(taskDir, 0755)
+
+	notifyMsg, _ := m.sender.SendMessage(ctx, peer, "<i>Fetching media info with yt-dlp...</i>", msg.MessageID, nil)
+	var notifyID int
+	if notifyMsg != nil {
+		if updates, ok := (*notifyMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
+			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
+				if mObj, ok := uMsg.Message.(*tg.Message); ok {
+					notifyID = mObj.ID
+				}
+			}
+		}
+	}
+
+	go m.processYtdl(peer, msg, link, customQuality, taskDir, notifyID)
+}
+
+func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageContext, link, customQuality, taskDir string, notifyID int) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer os.RemoveAll(taskDir)
+
+	cfg := config.Get()
+	user := m.userMap.Get(msg.UserID)
+	isPremium := telegram.IsPremium(msg.UserID, m.userMap)
+
+	yt := downloader.NewYtDlpDownloader()
+	task := &downloader.YtDlpDownloadTask{}
+	m.taskMgr.AddTask(task)
+	defer m.taskMgr.RemoveTask("ytdlp")
+
+	downloadedFile, err := yt.Download(ctx, link, taskDir, customQuality, nil)
+	if err != nil {
+		_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>yt-dlp Download Failed:</b> %v", err), nil)
+		return
+	}
+
+	finalName, caption := ext.FormatFilename(filepath.Base(downloadedFile), user, downloadedFile)
+	finalName = ext.SanitizeFilename(finalName)
+	renamedPath := filepath.Join(taskDir, finalName)
+	if renamedPath != downloadedFile {
+		_ = os.Rename(downloadedFile, renamedPath)
+		downloadedFile = renamedPath
+	}
+
+	customThumb := ""
+	if user != nil && user.CustomThumb != "" {
+		customThumb = user.CustomThumb
+	}
+
+	autoThumbEnabled := cfg.AutoThumbnail
+	if user != nil && user.AutoThumb {
+		autoThumbEnabled = true
+	}
+
+	if customThumb == "" && autoThumbEnabled {
+		if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, cfg.AsDocument, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
+			customThumb = tmdbThumb
+		}
+	}
+
+	thumbPath := ext.GenerateThumbnail(downloadedFile, customThumb)
+	defer func() {
+		if thumbPath != "" && thumbPath != customThumb {
+			_ = os.Remove(thumbPath)
+		}
+	}()
+
+	_ = m.sender.EditMessage(ctx, peer, notifyID, "<i>Uploading YouTube media to Telegram...</i>", nil)
+
+	upOpt := uploader.UploadOptions{
+		FilePath:   downloadedFile,
+		FileName:   finalName,
+		Caption:    caption,
+		ThumbPath:  thumbPath,
+		CoverPath:  customThumb,
+		AsDoc:      cfg.AsDocument,
+		DumpChatID: cfg.LeechLogID,
+		LogChatID:  cfg.LeechLogID,
+		IsPremium:  isPremium,
+	}
+
+	_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
+	if upErr != nil {
+		_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Upload Failed:</b> %v", upErr), nil)
+		return
+	}
+
+	_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+}
+

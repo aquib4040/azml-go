@@ -1,0 +1,12 @@
+# Binaries
+azml-go
+azml-go.exe
+*.exe
+
+# Configuration & data
+config.env
+user_data.json
+downloads/
+Thumbnails/
+*.log
+.env

@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  azml-go:
+    container_name: azml-go
+    image: aquib4040/azml:go
+    restart: unless-stopped
+    ports:
+      - "23434:23434"
+    env_file:
+      - .env
+    environment:
+      - BASE_URL_PORT=23434
+      - DOWNLOAD_DIR=/usr/src/app/downloads/
+      - GODEBUG=madvdontneed=1
+    volumes:
+      - ./.env:/usr/src/app/.env:ro
+      - ./config.env:/usr/src/app/config.env:ro
+      - ./downloads:/usr/src/app/downloads
+      - ./Thumbnails:/usr/src/app/Thumbnails
+      - ./token.pickle:/usr/src/app/token.pickle
+
