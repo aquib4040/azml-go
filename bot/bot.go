@@ -269,7 +269,17 @@ func (b *BotApp) registerDispatcher() {
 	})
 
 	b.dispatcher.OnBotCallbackQuery(func(ctx context.Context, e tg.Entities, update *tg.UpdateBotCallbackQuery) error {
-		b.routeCallback(ctx, update)
+		for chID, ch := range e.Channels {
+			if ch.AccessHash != 0 {
+				b.cacheChannelAccessHash(chID, ch.AccessHash)
+			}
+		}
+		for uID, u := range e.Users {
+			if u.AccessHash != 0 {
+				b.cacheAccessHash(uID, u.AccessHash)
+			}
+		}
+		b.routeCallback(ctx, update, e)
 		return nil
 	})
 }
@@ -478,9 +488,9 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	}
 }
 
-func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuery) {
+func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuery, entities tg.Entities) {
 	data := string(cb.Data)
-	peer := getPeer(cb.Peer)
+	peer := b.getPeerWithEntities(cb.Peer, entities)
 	if peer == nil {
 		return
 	}
@@ -498,7 +508,7 @@ func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuer
 		if b.cancelCbHandler != nil {
 			b.cancelCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data, cb.UserID)
 		}
-	case strings.HasPrefix(data, "uset"):
+	case strings.HasPrefix(data, "uset") || strings.HasPrefix(data, "userset"):
 		if b.settingsCbHandler != nil {
 			b.settingsCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data, cb.UserID)
 		}
@@ -714,6 +724,7 @@ func (b *BotApp) cacheAccessHash(userID, hash int64) {
 	accessHashMu.Lock()
 	userAccessHashes[userID] = hash
 	accessHashMu.Unlock()
+	telegram.CacheUserAccessHash(userID, hash)
 }
 
 func (b *BotApp) cacheChannelAccessHash(channelID, hash int64) {
@@ -723,6 +734,7 @@ func (b *BotApp) cacheChannelAccessHash(channelID, hash int64) {
 	accessHashMu.Lock()
 	channelAccessHashes[channelID] = hash
 	accessHashMu.Unlock()
+	telegram.CacheChannelAccessHash(channelID, hash)
 }
 
 func (b *BotApp) getPeerWithEntities(p tg.PeerClass, entities tg.Entities) tg.InputPeerClass {
@@ -735,6 +747,9 @@ func (b *BotApp) getPeerWithEntities(p tg.PeerClass, entities tg.Entities) tg.In
 		accessHashMu.RLock()
 		hash := userAccessHashes[v.UserID]
 		accessHashMu.RUnlock()
+		if hash == 0 {
+			hash = telegram.GetUserAccessHash(v.UserID)
+		}
 		return &tg.InputPeerUser{UserID: v.UserID, AccessHash: hash}
 	case *tg.PeerChat:
 		return &tg.InputPeerChat{ChatID: v.ChatID}
@@ -746,6 +761,9 @@ func (b *BotApp) getPeerWithEntities(p tg.PeerClass, entities tg.Entities) tg.In
 		accessHashMu.RLock()
 		hash := channelAccessHashes[v.ChannelID]
 		accessHashMu.RUnlock()
+		if hash == 0 {
+			hash = telegram.GetChannelAccessHash(v.ChannelID)
+		}
 		return &tg.InputPeerChannel{ChannelID: v.ChannelID, AccessHash: hash}
 	}
 	return nil
@@ -757,6 +775,9 @@ func getPeer(p tg.PeerClass) tg.InputPeerClass {
 		accessHashMu.RLock()
 		hash := userAccessHashes[v.UserID]
 		accessHashMu.RUnlock()
+		if hash == 0 {
+			hash = telegram.GetUserAccessHash(v.UserID)
+		}
 		return &tg.InputPeerUser{UserID: v.UserID, AccessHash: hash}
 	case *tg.PeerChat:
 		return &tg.InputPeerChat{ChatID: v.ChatID}
@@ -764,6 +785,9 @@ func getPeer(p tg.PeerClass) tg.InputPeerClass {
 		accessHashMu.RLock()
 		hash := channelAccessHashes[v.ChannelID]
 		accessHashMu.RUnlock()
+		if hash == 0 {
+			hash = telegram.GetChannelAccessHash(v.ChannelID)
+		}
 		return &tg.InputPeerChannel{ChannelID: v.ChannelID, AccessHash: hash}
 	}
 	return nil

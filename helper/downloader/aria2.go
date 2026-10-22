@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -308,9 +309,13 @@ type Aria2DownloadTask struct {
 }
 
 func NewAria2DownloadTask(gid, name, downloadDir string, msgID int, chatID, userID int64) *Aria2DownloadTask {
+	cleanName := name
+	if cleanName != "" {
+		cleanName = filepath.Base(cleanName)
+	}
 	return &Aria2DownloadTask{
 		gid:         gid,
-		name:        name,
+		name:        cleanName,
 		status:      types.StatusDownloading,
 		startTime:   time.Now(),
 		messageID:   msgID,
@@ -415,8 +420,9 @@ func (t *Aria2DownloadTask) PollUntilComplete(ctx context.Context, onProgress fu
 			t.speed = spd
 
 			if len(res.Files) > 0 {
-				if t.name == "" || t.name == "Unknown" {
-					t.name = res.Files[0].Path
+				clean := filepath.Base(res.Files[0].Path)
+				if clean != "" && clean != "." && clean != "/" {
+					t.name = clean
 				}
 				t.downloadPath = res.Files[0].Path
 			}

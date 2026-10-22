@@ -7,29 +7,31 @@ import (
 	"path/filepath"
 	"strings"
 
-	"azml-go/types"
 	"azml-go/config"
 	"azml-go/helper/downloader"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
 	"azml-go/helper/uploader"
+	"azml-go/types"
 
 	"github.com/gotd/td/tg"
 )
 
 type YtdlModule struct {
-	sender   *telegram.MessageSender
-	uploader *uploader.TelegramUploader
-	userMap  *types.SafeUserMap
-	taskMgr  *ext.TaskManager
+	sender    *telegram.MessageSender
+	uploader  *uploader.TelegramUploader
+	userMap   *types.SafeUserMap
+	taskMgr   *ext.TaskManager
+	statusMod *StatusModule
 }
 
-func NewYtdlModule(sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap) *YtdlModule {
+func NewYtdlModule(sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule) *YtdlModule {
 	return &YtdlModule{
-		sender:   sender,
-		uploader: uploader,
-		userMap:  userMap,
-		taskMgr:  ext.GetTaskManager(),
+		sender:    sender,
+		uploader:  uploader,
+		userMap:   userMap,
+		taskMgr:   ext.GetTaskManager(),
+		statusMod: statusMod,
 	}
 }
 
@@ -73,6 +75,9 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 	_ = os.MkdirAll(taskDir, 0755)
 
 	notifyID, _ := m.sender.SendMessage(ctx, peer, "<i>Fetching media info with yt-dlp...</i>", msg.MessageID, nil)
+	if notifyID > 0 && m.statusMod != nil {
+		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+	}
 
 	go m.processYtdl(peer, msg, link, customQuality, taskDir, notifyID)
 }
@@ -86,12 +91,25 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	user := m.userMap.Get(msg.UserID)
 	isPremium := telegram.IsPremium(msg.UserID, m.userMap)
 
-	yt := downloader.NewYtDlpDownloader()
-	task := &downloader.YtDlpDownloadTask{}
-	m.taskMgr.AddTask(task)
-	defer m.taskMgr.RemoveTask("ytdlp")
+	taskUID := fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(3))
+	uTask := ext.NewUnifiedTask(taskUID, "yt-dlp Media", 0, msg.ChatID, msg.UserID, notifyID, cancel)
+	uTask.SetEngine("yt-dlp")
+	m.taskMgr.AddTask(uTask)
+	defer func() {
+		m.taskMgr.RemoveTask(taskUID)
+		if m.statusMod != nil {
+			if m.taskMgr.Count() == 0 {
+				m.statusMod.DeleteAllMessages(context.Background())
+			} else {
+				go m.statusMod.UpdateAllMessages(context.Background(), true)
+			}
+		}
+	}()
 
-	downloadedFile, err := yt.Download(ctx, link, taskDir, customQuality, nil)
+	yt := downloader.NewYtDlpDownloader()
+	downloadedFile, err := yt.Download(ctx, link, taskDir, customQuality, func(curr, total int64, speed float64, eta string) {
+		uTask.SetProgress(curr, total, speed, eta)
+	})
 	if err != nil {
 		_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>yt-dlp Download Failed:</b> %v", err), nil)
 		return
@@ -104,6 +122,12 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		_ = os.Rename(downloadedFile, renamedPath)
 		downloadedFile = renamedPath
 	}
+
+	if fi, sErr := os.Stat(downloadedFile); sErr == nil {
+		uTask.SetName(finalName)
+		uTask.SetSize(fi.Size())
+	}
+	uTask.SetStatus(types.StatusUploading, "Gotd Uploader")
 
 	customThumb := ""
 	if user != nil && user.CustomThumb != "" {
@@ -128,8 +152,6 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		}
 	}()
 
-	_ = m.sender.EditMessage(ctx, peer, notifyID, "<i>Uploading YouTube media to Telegram...</i>", nil)
-
 	upOpt := uploader.UploadOptions{
 		FilePath:   downloadedFile,
 		FileName:   finalName,
@@ -140,6 +162,9 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		DumpChatID: cfg.LeechLogID,
 		LogChatID:  cfg.LeechLogID,
 		IsPremium:  isPremium,
+		OnProgress: func(curr, total int64, speed float64, eta string) {
+			uTask.SetProgress(curr, total, speed, eta)
+		},
 	}
 
 	_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
@@ -148,6 +173,10 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		return
 	}
 
-	_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	if m.statusMod != nil {
+		m.statusMod.RemoveStatusMessage(msg.ChatID)
+	}
+	if notifyID > 0 {
+		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	}
 }
-

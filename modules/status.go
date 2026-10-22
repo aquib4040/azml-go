@@ -75,6 +75,24 @@ func (m *StatusModule) getChatPage(chatID int64) int {
 }
 
 func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
+	m.mu.Lock()
+	oldInfo, hasOld := m.statusReplies[msg.ChatID]
+	if hasOld && oldInfo != nil && oldInfo.MessageID > 0 {
+		_ = m.sender.DeleteMessage(ctx, oldInfo.Peer, []int{oldInfo.MessageID})
+		delete(m.statusReplies, msg.ChatID)
+	}
+	m.mu.Unlock()
+
+	// If no active tasks exist, show a temporary stats message and auto-delete it after 12s
+	if m.taskMgr.Count() == 0 {
+		text, _ := m.taskMgr.BuildStatusMessage(1)
+		sentID, err := m.sender.SendMessage(ctx, peer, text, msg.MessageID, nil)
+		if err == nil && sentID > 0 {
+			m.sender.AutoDeleteMessage(peer, sentID, 12)
+		}
+		return
+	}
+
 	page := m.getChatPage(msg.ChatID)
 	totalPages := m.taskMgr.GetTotalPages()
 	if totalPages > 0 && page > totalPages {
@@ -82,15 +100,6 @@ func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass,
 	}
 	if page < 1 {
 		page = 1
-	}
-
-	m.mu.Lock()
-	oldInfo, hasOld := m.statusReplies[msg.ChatID]
-	m.mu.Unlock()
-
-	// Delete old status message if exists in this chat (matching Python AZML sendStatusMessage)
-	if hasOld && oldInfo != nil && oldInfo.MessageID > 0 {
-		_ = m.sender.DeleteMessage(ctx, oldInfo.Peer, []int{oldInfo.MessageID})
 	}
 
 	text, btn := m.taskMgr.BuildStatusMessage(page)
@@ -121,6 +130,14 @@ func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPe
 		return
 	}
 	m.mu.Lock()
+	// Never show 2 task/status messages at once! Delete old message if exists
+	if old, exists := m.statusReplies[chatID]; exists && old != nil && old.MessageID > 0 && old.MessageID != msgID {
+		go func(p tg.InputPeerClass, id int) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = m.sender.DeleteMessage(ctx, p, []int{id})
+		}(old.Peer, old.MessageID)
+	}
 	m.statusReplies[chatID] = &StatusReplyInfo{
 		ChatID:      chatID,
 		MessageID:   msgID,
@@ -136,6 +153,27 @@ func (m *StatusModule) RemoveStatusMessage(chatID int64) {
 	m.mu.Lock()
 	delete(m.statusReplies, chatID)
 	m.mu.Unlock()
+}
+
+// DeleteAllMessages deletes all active status messages and clears tracked replies
+func (m *StatusModule) DeleteAllMessages(ctx context.Context) {
+	m.mu.Lock()
+	if len(m.statusReplies) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	replies := make([]*StatusReplyInfo, 0, len(m.statusReplies))
+	for _, r := range m.statusReplies {
+		replies = append(replies, r)
+	}
+	m.statusReplies = make(map[int64]*StatusReplyInfo)
+	m.mu.Unlock()
+
+	for _, r := range replies {
+		if r != nil && r.MessageID > 0 {
+			_ = m.sender.DeleteMessage(ctx, r.Peer, []int{r.MessageID})
+		}
+	}
 }
 
 func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string) {
@@ -251,6 +289,12 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 
 // UpdateAllMessages periodically refreshes active status messages on their current active page
 func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
+	// If no tasks are running, automatically delete all status progress messages
+	if m.taskMgr.Count() == 0 {
+		m.DeleteAllMessages(ctx)
+		return
+	}
+
 	m.mu.Lock()
 	if len(m.statusReplies) == 0 {
 		m.mu.Unlock()
@@ -284,7 +328,6 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 			m.mu.Unlock()
 		}
 
-		// Stays on targetPage (e.g. Page 2 stays on Page 2)
 		text, btn := m.taskMgr.BuildStatusMessage(targetPage)
 		var markup tg.ReplyMarkupClass
 		if btn != nil {
@@ -305,5 +348,3 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		}
 	}
 }
-
-

@@ -33,51 +33,146 @@ func (m *SettingsModule) HandleSettings(ctx context.Context, peer tg.InputPeerCl
 	if len(parts) >= 2 {
 		subCmd := strings.ToLower(parts[1])
 		switch subCmd {
-		case "auto_thumb", "autothumb":
-			u.AutoThumb = !u.AutoThumb
-			_ = ext.DB.SaveUser(u)
-			status := "Disabled"
-			if u.AutoThumb {
-				status = "Enabled"
-			}
-			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("🖼 <b>Auto Thumbnail</b> is now: <b>%s</b>", status), msg.MessageID, nil)
-			return
 		case "prefix":
 			if len(parts) >= 3 {
 				u.Prefix = strings.Join(parts[2:], " ")
 				_ = ext.DB.SaveUser(u)
-				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("Prefix set to: <code>%s</code>", u.Prefix), msg.MessageID, nil)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Prefix</b> set to: <code>%s</code>", u.Prefix), msg.MessageID, nil)
 				return
 			}
 		case "suffix":
 			if len(parts) >= 3 {
 				u.Suffix = strings.Join(parts[2:], " ")
 				_ = ext.DB.SaveUser(u)
-				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("Suffix set to: <code>%s</code>", u.Suffix), msg.MessageID, nil)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Suffix</b> set to: <code>%s</code>", u.Suffix), msg.MessageID, nil)
 				return
 			}
 		case "caption":
 			if len(parts) >= 3 {
 				u.Caption = strings.Join(parts[2:], " ")
 				_ = ext.DB.SaveUser(u)
-				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("Caption set to: <code>%s</code>", u.Caption), msg.MessageID, nil)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Caption</b> set to: <code>%s</code>", u.Caption), msg.MessageID, nil)
 				return
 			}
 		case "autorename":
 			if len(parts) >= 3 {
 				u.RemnameAuto = strings.Join(parts[2:], " ")
 				_ = ext.DB.SaveUser(u)
-				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("AutoRename template set to: <code>%s</code>", u.RemnameAuto), msg.MessageID, nil)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>AutoRename template</b> set to: <code>%s</code>", u.RemnameAuto), msg.MessageID, nil)
 				return
 			}
+		case "split", "splitsize":
+			if len(parts) >= 3 {
+				sizeStr := strings.ToUpper(parts[2])
+				maxSplit := config.GetMaxSplitSize()
+				var bytes int64
+				if strings.HasSuffix(sizeStr, "GB") {
+					val, _ := strconv.ParseFloat(strings.TrimSuffix(sizeStr, "GB"), 64)
+					bytes = int64(val * 1024 * 1024 * 1024)
+				} else if strings.HasSuffix(sizeStr, "MB") {
+					val, _ := strconv.ParseFloat(strings.TrimSuffix(sizeStr, "MB"), 64)
+					bytes = int64(val * 1024 * 1024)
+				} else {
+					bytes, _ = strconv.ParseInt(sizeStr, 10, 64)
+				}
+				if bytes > maxSplit || bytes <= 0 {
+					bytes = maxSplit
+				}
+				u.SplitSize = bytes
+				_ = ext.DB.SaveUser(u)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Split Size</b> set to: <code>%s</code>", ext.GetReadableFileSize(u.SplitSize)), msg.MessageID, nil)
+				return
+			}
+		case "dump":
+			if len(parts) >= 3 {
+				id, _ := strconv.ParseInt(parts[2], 10, 64)
+				u.DumpChatID = id
+				_ = ext.DB.SaveUser(u)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Dump Channel ID</b> set to: <code>%d</code>", u.DumpChatID), msg.MessageID, nil)
+				return
+			}
+		case "meta", "metadata":
+			if len(parts) >= 3 {
+				if u.Metadata == nil {
+					u.Metadata = make(map[string]string)
+				}
+				u.Metadata["all"] = strings.Join(parts[2:], " ")
+				_ = ext.DB.SaveUser(u)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Metadata (All)</b> set to: <code>%s</code>", u.Metadata["all"]), msg.MessageID, nil)
+				return
+			}
+		case "title":
+			if len(parts) >= 3 {
+				if u.Metadata == nil {
+					u.Metadata = make(map[string]string)
+				}
+				u.Metadata["title"] = strings.Join(parts[2:], " ")
+				_ = ext.DB.SaveUser(u)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Metadata Title</b> set to: <code>%s</code>", u.Metadata["title"]), msg.MessageID, nil)
+				return
+			}
+		case "artist", "author":
+			if len(parts) >= 3 {
+				if u.Metadata == nil {
+					u.Metadata = make(map[string]string)
+				}
+				u.Metadata["artist"] = strings.Join(parts[2:], " ")
+				_ = ext.DB.SaveUser(u)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Metadata Artist</b> set to: <code>%s</code>", u.Metadata["artist"]), msg.MessageID, nil)
+				return
+			}
+		case "autothumb", "auto_thumb":
+			u.AutoThumb = !u.AutoThumb
+			_ = ext.DB.SaveUser(u)
+			st := "Disabled"
+			if u.AutoThumb {
+				st = "Enabled"
+			}
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("🖼 <b>Auto Thumbnail</b> is now: <b>%s</b>", st), msg.MessageID, nil)
+			return
+		case "asdoc":
+			u.AsDoc = !u.AsDoc
+			_ = ext.DB.SaveUser(u)
+			st := "Disabled"
+			if u.AsDoc {
+				st = "Enabled"
+			}
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("📄 <b>Upload As Document</b> is now: <b>%s</b>", st), msg.MessageID, nil)
+			return
+		case "equalsplits":
+			u.EqualSplits = !u.EqualSplits
+			_ = ext.DB.SaveUser(u)
+			st := "Disabled"
+			if u.EqualSplits {
+				st = "Enabled"
+			}
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✂️ <b>Equal Splits</b> is now: <b>%s</b>", st), msg.MessageID, nil)
+			return
 		}
 	}
 
-	text, btn := m.buildSettingsMenu(u)
-	_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, btn.BuildMenu(2))
+	text, btn := m.buildMainMenu(u, msg.SenderName)
+	_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, btn)
 }
 
-func (m *SettingsModule) buildSettingsMenu(u *types.UserSettings) (string, *telegram.ButtonMaker) {
+func (m *SettingsModule) buildMainMenu(u *types.UserSettings, name string) (string, tg.ReplyMarkupClass) {
+	if name == "" {
+		name = "User"
+	}
+	text := fmt.Sprintf("⚙️ <b>User Settings for <a href=\"tg://user?id=%d\">%s</a></b> (<code>%d</code>)\n\n"+
+		"<i>Select a category below to configure your preferences:</i>",
+		u.UserID, name, u.UserID)
+
+	btn := telegram.NewButtonMaker()
+	btn.IButton("📥 Leech Settings", fmt.Sprintf("userset %d leech", u.UserID))
+	btn.IButton("🏷 Metadata Settings", fmt.Sprintf("userset %d metadata", u.UserID))
+	btn.IButton("🌐 Universal Settings", fmt.Sprintf("userset %d universal", u.UserID))
+	btn.IButton("❌ Close", fmt.Sprintf("userset %d close", u.UserID))
+
+	return text, btn.BuildMenu(1)
+}
+
+func (m *SettingsModule) buildLeechMenu(u *types.UserSettings) (string, tg.ReplyMarkupClass) {
 	prefix := u.Prefix
 	if prefix == "" {
 		prefix = "Not Set"
@@ -102,41 +197,111 @@ func (m *SettingsModule) buildSettingsMenu(u *types.UserSettings) (string, *tele
 	if u.AutoThumb {
 		autoThumbStatus = "Enabled"
 	}
-	split := "2 GB (Default)"
+	split := ext.GetReadableFileSize(config.GetMaxSplitSize()) + " (Default)"
 	if u.SplitSize > 0 {
 		split = ext.GetReadableFileSize(u.SplitSize)
 	}
 
-	text := fmt.Sprintf("⚙️ <b>User Settings for</b> <code>%d</code>\n\n"+
+	text := fmt.Sprintf("➲ <b><u>Leech Settings for <a href=\"tg://user?id=%d\">%d</a></u></b>\n\n"+
 		"┠ <b>Prefix:</b> <code>%s</code>\n"+
 		"┠ <b>Suffix:</b> <code>%s</code>\n"+
-		"┠ <b>AutoRename:</b> <code>%s</code>\n"+
-		"┠ <b>Method:</b> <code>%s</code>\n"+
+		"┠ <b>AutoRename Template:</b> <code>%s</code>\n"+
 		"┠ <b>Caption:</b> <code>%s</code>\n"+
-		"┠ <b>Custom Thumb:</b> <code>%s</code>\n"+
+		"┠ <b>Custom Thumbnail:</b> <code>%s</code>\n"+
 		"┠ <b>TMDB Auto Thumb:</b> <code>%s</code>\n"+
 		"┠ <b>Split Size:</b> <code>%s</code>\n"+
 		"┖ <b>Dump Channel:</b> <code>%d</code>\n\n"+
-		"<i>Click buttons below to toggle or send new settings!</i>",
-		u.UserID, prefix, suffix, autoRename, u.RenameMethod, caption, thumb, autoThumbStatus, split, u.DumpChatID)
+		"<i>Click buttons below to toggle or configure!</i>",
+		u.UserID, u.UserID, prefix, suffix, autoRename, caption, thumb, autoThumbStatus, split, u.DumpChatID)
 
 	btn := telegram.NewButtonMaker()
-	btn.IButton("Set Prefix", fmt.Sprintf("uset %d prefix", u.UserID))
-	btn.IButton("Set Suffix", fmt.Sprintf("uset %d suffix", u.UserID))
-	btn.IButton("AutoRename Tmpl", fmt.Sprintf("uset %d autorename", u.UserID))
-	btn.IButton("Toggle Method", fmt.Sprintf("uset %d toggle_method", u.UserID))
-	btn.IButton("Set Caption", fmt.Sprintf("uset %d caption", u.UserID))
+	btn.IButton("Set Prefix", fmt.Sprintf("userset %d prefix", u.UserID))
+	btn.IButton("Set Suffix", fmt.Sprintf("userset %d suffix", u.UserID))
+	btn.IButton("AutoRename Tmpl", fmt.Sprintf("userset %d autorename", u.UserID))
+	btn.IButton("Set Caption", fmt.Sprintf("userset %d caption", u.UserID))
+	btn.IButton("Custom Thumb", fmt.Sprintf("userset %d thumb", u.UserID))
 	if u.AutoThumb {
-		btn.IButton("Disable Auto Thumb", fmt.Sprintf("uset %d auto_thumb", u.UserID))
+		btn.IButton("Disable TMDB Thumb", fmt.Sprintf("userset %d toggle_autothumb", u.UserID))
 	} else {
-		btn.IButton("Enable Auto Thumb", fmt.Sprintf("uset %d auto_thumb", u.UserID))
+		btn.IButton("Enable TMDB Thumb", fmt.Sprintf("userset %d toggle_autothumb", u.UserID))
 	}
-	btn.IButton("Set Split Size", fmt.Sprintf("uset %d split", u.UserID))
-	btn.IButton("Set Dump ID", fmt.Sprintf("uset %d dump", u.UserID))
-	btn.IButton("Back", fmt.Sprintf("uset %d back", u.UserID))
-	btn.IButton("Close", fmt.Sprintf("uset %d close", u.UserID))
+	btn.IButton("Set Split Size", fmt.Sprintf("userset %d split", u.UserID))
+	btn.IButton("Set Dump ID", fmt.Sprintf("userset %d dump", u.UserID))
+	btn.IButton("🔙 Back", fmt.Sprintf("userset %d main", u.UserID))
+	btn.IButton("❌ Close", fmt.Sprintf("userset %d close", u.UserID))
 
-	return text, btn
+	return text, btn.BuildMenu(2)
+}
+
+func (m *SettingsModule) buildMetadataMenu(u *types.UserSettings) (string, tg.ReplyMarkupClass) {
+	metaAll := "Not Set"
+	metaTitle := "Not Set"
+	metaArtist := "Not Set"
+	metaDesc := "Not Set"
+
+	if u.Metadata != nil {
+		if v, ok := u.Metadata["all"]; ok && v != "" {
+			metaAll = v
+		}
+		if v, ok := u.Metadata["title"]; ok && v != "" {
+			metaTitle = v
+		}
+		if v, ok := u.Metadata["artist"]; ok && v != "" {
+			metaArtist = v
+		}
+		if v, ok := u.Metadata["description"]; ok && v != "" {
+			metaDesc = v
+		}
+	}
+
+	text := fmt.Sprintf("➲ <b><u>Metadata Settings for <a href=\"tg://user?id=%d\">%d</a></u></b>\n\n"+
+		"┠ <b>Change All:</b> <code>%s</code>\n"+
+		"┠ <b>Title:</b> <code>%s</code>\n"+
+		"┠ <b>Artist / Author:</b> <code>%s</code>\n"+
+		"┖ <b>Description:</b> <code>%s</code>\n\n"+
+		"➲ <b>Description:</b> <i>Configure custom video metadata tags. Send <code>/us meta [text]</code> to change all tags at once, or use individual buttons.</i>",
+		u.UserID, u.UserID, metaAll, metaTitle, metaArtist, metaDesc)
+
+	btn := telegram.NewButtonMaker()
+	btn.IButton("Change All", fmt.Sprintf("userset %d meta", u.UserID))
+	btn.IButton("Set Title", fmt.Sprintf("userset %d title", u.UserID))
+	btn.IButton("Set Artist", fmt.Sprintf("userset %d artist", u.UserID))
+	btn.IButton("Set Description", fmt.Sprintf("userset %d desc", u.UserID))
+	btn.IButton("🔙 Back", fmt.Sprintf("userset %d main", u.UserID))
+	btn.IButton("❌ Close", fmt.Sprintf("userset %d close", u.UserID))
+
+	return text, btn.BuildMenu(2)
+}
+
+func (m *SettingsModule) buildUniversalMenu(u *types.UserSettings) (string, tg.ReplyMarkupClass) {
+	autoThumb := "Disabled"
+	if u.AutoThumb {
+		autoThumb = "Enabled"
+	}
+	asDoc := "Disabled"
+	if u.AsDoc {
+		asDoc = "Enabled"
+	}
+	equalSplits := "Disabled"
+	if u.EqualSplits {
+		equalSplits = "Enabled"
+	}
+
+	text := fmt.Sprintf("➲ <b><u>Universal Settings for <a href=\"tg://user?id=%d\">%d</a></u></b>\n\n"+
+		"┠ <b>Auto Thumbnail:</b> <code>%s</code>\n"+
+		"┠ <b>Upload As Document:</b> <code>%s</code>\n"+
+		"┖ <b>Equal Splits:</b> <code>%s</code>\n\n"+
+		"<i>Click buttons below to toggle options:</i>",
+		u.UserID, u.UserID, autoThumb, asDoc, equalSplits)
+
+	btn := telegram.NewButtonMaker()
+	btn.IButton("Toggle Auto Thumb", fmt.Sprintf("userset %d toggle_autothumb", u.UserID))
+	btn.IButton("Toggle As Doc", fmt.Sprintf("userset %d toggle_asdoc", u.UserID))
+	btn.IButton("Toggle Equal Splits", fmt.Sprintf("userset %d toggle_equalsplits", u.UserID))
+	btn.IButton("🔙 Back", fmt.Sprintf("userset %d main", u.UserID))
+	btn.IButton("❌ Close", fmt.Sprintf("userset %d close", u.UserID))
+
+	return text, btn.BuildMenu(2)
 }
 
 func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUserID int64) {
@@ -155,47 +320,57 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 	u := m.userMap.GetOrCreate(targetUID)
 
 	switch action {
-	case "open":
-		text, btn := m.buildSettingsMenu(u)
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
+	case "main", "back", "open":
+		text, markup := m.buildMainMenu(u, "")
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+	case "leech":
+		text, markup := m.buildLeechMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+	case "metadata":
+		text, markup := m.buildMetadataMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+	case "universal":
+		text, markup := m.buildUniversalMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 	case "close":
 		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 		_ = m.sender.AnswerCallback(ctx, queryID, "Settings closed", false)
-	case "back":
-		cfg := config.Get()
-		sfx := cfg.CmdSuffix
-		reply := fmt.Sprintf("👋 <b>Hello!</b>\n\n"+
-			"<i>This bot can leech all your links|files|torrents to Telegram or to ddl servers.</i>\n\n"+
-			"Type <code>/help%s</code> to get a list of available commands.", sfx)
-		btn := telegram.NewButtonMaker()
-		btn.UButton("Repo", "https://github.com/aquib4040/AZML")
-		btn.IButton("Settings", fmt.Sprintf("uset %d open", targetUID))
-		_ = m.sender.EditMessage(ctx, peer, msgID, reply, btn.BuildMenu(2))
-		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
-	case "toggle_method":
-		if u.RenameMethod == "auto" {
-			u.RenameMethod = "regex"
-		} else {
-			u.RenameMethod = "auto"
-		}
-		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildSettingsMenu(u)
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
-		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Method changed to %s", u.RenameMethod), false)
-	case "auto_thumb":
+	case "toggle_autothumb":
 		u.AutoThumb = !u.AutoThumb
 		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildSettingsMenu(u)
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
-		status := "Disabled"
+		text, markup := m.buildLeechMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		st := "Disabled"
 		if u.AutoThumb {
-			status = "Enabled"
+			st = "Enabled"
 		}
-		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Auto Thumbnail is now %s", status), false)
+		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Auto Thumbnail is now %s", st), false)
+	case "toggle_asdoc":
+		u.AsDoc = !u.AsDoc
+		_ = ext.DB.SaveUser(u)
+		text, markup := m.buildUniversalMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		st := "Disabled"
+		if u.AsDoc {
+			st = "Enabled"
+		}
+		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("As Document is now %s", st), false)
+	case "toggle_equalsplits":
+		u.EqualSplits = !u.EqualSplits
+		_ = ext.DB.SaveUser(u)
+		text, markup := m.buildUniversalMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		st := "Disabled"
+		if u.EqualSplits {
+			st = "Enabled"
+		}
+		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Equal Splits is now %s", st), false)
 	default:
-		helpText := fmt.Sprintf("To set %s, reply with your value!\nExample: /usetting %s [value]", action, action)
+		helpText := fmt.Sprintf("To set %s, send: /us %s [value]", action, action)
 		_ = m.sender.AnswerCallback(ctx, queryID, helpText, true)
 	}
 }
-

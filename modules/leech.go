@@ -265,10 +265,22 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			}
 		} else if msg.FileName != "" {
 			displayName = msg.FileName
-		} else {
-			displayName = "Leech_Task"
 		}
 	}
+	displayName = filepath.Base(displayName)
+
+	uTask := ext.NewUnifiedTask(taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
+	m.taskMgr.AddTask(uTask)
+	defer func() {
+		m.taskMgr.RemoveTask(taskUID)
+		if m.statusMod != nil {
+			if m.taskMgr.Count() == 0 {
+				m.statusMod.DeleteAllMessages(context.Background())
+			} else {
+				go m.statusMod.UpdateAllMessages(context.Background(), true)
+			}
+		}
+	}()
 
 	// 0. Queue Check for Download (Sleep v0 Engine)
 	queuedDL, qErr := ext.AcquireDownloadQueue(ctx, taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
@@ -393,10 +405,12 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		}
 
 		task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
-		m.taskMgr.AddTask(task)
-		defer m.taskMgr.RemoveTask(gid)
-
-		downloadedPath, dlErr = task.PollUntilComplete(ctx, nil)
+		downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+			uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+			if task.Name() != "" {
+				uTask.SetName(task.Name())
+			}
+		})
 	} else {
 		// Fallback Direct HTTP
 		directDl := downloader.NewDirectDownloader()
@@ -414,10 +428,17 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		return
 	}
 	ext.ReleaseDownload(taskUID)
+	displayName = filepath.Base(downloadedPath)
+	uTask.SetName(displayName)
+	if fi, err := os.Stat(downloadedPath); err == nil && !fi.IsDir() {
+		uTask.SetSize(fi.Size())
+		uTask.SetProgress(fi.Size(), fi.Size(), 0, "-")
+	}
 
 	// 2. Post-processing: Forceful Archive Extraction (/leech -e, -extract, -uz)
 	// Reads binary magic bytes (PK, 7z, Rar!, etc.) even if the file extension was disguised or missed
 	if opt.IsExtract {
+		uTask.SetStatus(types.StatusExtracting, "7-Zip")
 		isArch, archType := ext.IsArchive(downloadedPath)
 		if isArch {
 			log.Printf("[LEECH -e] Detected archive format '%s' via binary header for: %s", archType, downloadedPath)
@@ -443,6 +464,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			})
 		}
 	} else if opt.IsZip {
+		uTask.SetStatus(types.StatusArchiving, "7-Zip")
 		// Compression requested (-z / -zip)
 		zipTarget := filepath.Join(taskDir, filepath.Base(downloadedPath)+".zip")
 		if err := ext.CompressToZip(downloadedPath, zipTarget, ""); err == nil {
@@ -461,6 +483,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	// Custom FFmpeg commands (-ff)
 	if opt.FFmpegKey != "" && cfg.EnableFFmpegCmds {
+		uTask.SetStatus(types.StatusFFmpeg, "FFmpeg")
 		rawCmd := opt.FFmpegKey
 		if user != nil && user.FFmpegCommands != nil {
 			if preset, ok := user.FFmpegCommands[opt.FFmpegKey]; ok {
@@ -478,6 +501,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	// 3. Post-processing: Metadata editing
 	if user != nil && len(user.Metadata) > 0 {
+		uTask.SetStatus(types.StatusFFmpeg, "FFmpeg")
 		outMeta := filepath.Join(taskDir, "meta_"+filepath.Base(downloadedPath))
 		if err := ext.EditMetadata(downloadedPath, outMeta, user.Metadata); err == nil {
 			_ = os.Remove(downloadedPath)
@@ -492,6 +516,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 	// Auto conversion of symbols like / and \ so no new directory gets created
 	finalName = ext.SanitizeFilename(finalName)
+	uTask.SetName(finalName)
 	renamedPath := filepath.Join(taskDir, finalName)
 	if renamedPath != downloadedPath {
 		_ = os.Rename(downloadedPath, renamedPath)
@@ -533,6 +558,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}()
 
 	// 7. File Splitting (1.91GB standard, 3.91GB for Telegram Premium userbot)
+	uTask.SetStatus(types.StatusSplitting, "7-Zip")
 	maxSplit := config.GetMaxSplitSize()
 	splitSize := cfg.LeechSplitSize
 	if user != nil && user.SplitSize > 0 {
@@ -569,10 +595,9 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	_ = m.sender.EditMessage(ctx, peer, notifyID, "<i>Uploading to Telegram...</i>", nil)
 
-	uploadGID := fmt.Sprintf("up_%s", ext.RandomHex(3))
-	uploadTask := uploader.NewUploadTask(uploadGID, displayName, uploadSize, msg.ChatID, msg.UserID, notifyID, cancel)
-	m.taskMgr.AddTask(uploadTask)
-	defer m.taskMgr.RemoveTask(uploadGID)
+	uTask.SetStatus(types.StatusUploading, "MTProto")
+	uTask.SetSize(uploadSize)
+	uTask.SetProgress(0, uploadSize, 0, "-")
 
 	dumpID := cfg.LeechLogID
 	if opt.UserDump != 0 {
@@ -601,7 +626,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			LogChatID:  cfg.LeechLogID,
 			IsPremium:  isPremium,
 			OnProgress: func(curr, total int64, speed float64, eta string) {
-				uploadTask.Update(curr, total, speed, eta)
+				uTask.SetProgress(curr, total, speed, eta)
 			},
 		}
 

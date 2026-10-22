@@ -2,14 +2,55 @@ package telegram
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/telegram/message/entity"
 	"github.com/gotd/td/telegram/message/html"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
+
+var (
+	accessHashMu        sync.RWMutex
+	channelAccessHashes = make(map[int64]int64)
+	userAccessHashes    = make(map[int64]int64)
+)
+
+func CacheChannelAccessHash(channelID, hash int64) {
+	if hash == 0 {
+		return
+	}
+	accessHashMu.Lock()
+	channelAccessHashes[channelID] = hash
+	accessHashMu.Unlock()
+}
+
+func GetChannelAccessHash(channelID int64) int64 {
+	accessHashMu.RLock()
+	defer accessHashMu.RUnlock()
+	return channelAccessHashes[channelID]
+}
+
+func CacheUserAccessHash(userID, hash int64) {
+	if hash == 0 {
+		return
+	}
+	accessHashMu.Lock()
+	userAccessHashes[userID] = hash
+	accessHashMu.Unlock()
+}
+
+func GetUserAccessHash(userID int64) int64 {
+	accessHashMu.RLock()
+	defer accessHashMu.RUnlock()
+	return userAccessHashes[userID]
+}
 
 type MessageSender struct {
 	rawClient *tg.Client
@@ -130,14 +171,87 @@ func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass,
 	return err
 }
 
+// DeleteMessage deletes messages for both PMs/basic groups and supergroups/channels
 func (m *MessageSender) DeleteMessage(ctx context.Context, peer tg.InputPeerClass, msgIDs []int) error {
-	_, err := m.rawClient.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-		ID: msgIDs,
-	})
+	if len(msgIDs) == 0 {
+		return nil
+	}
+	var err error
+	switch p := peer.(type) {
+	case *tg.InputPeerChannel:
+		accessHash := p.AccessHash
+		if accessHash == 0 {
+			accessHash = GetChannelAccessHash(p.ChannelID)
+		}
+		_, err = m.rawClient.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  p.ChannelID,
+				AccessHash: accessHash,
+			},
+			ID: msgIDs,
+		})
+	default:
+		_, err = m.rawClient.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+			Revoke: true,
+			ID:     msgIDs,
+		})
+	}
 	if err != nil {
 		log.Printf("[AZML-Go Bot Client] Error deleting messages %v: %v", msgIDs, err)
 	}
 	return err
+}
+
+// SendPhotoFromURL fetches a photo from imageURL and sends it to Telegram as a native photo
+func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerClass, imageURL, caption string, replyToID int) (int, error) {
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", imageURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("bad HTTP status fetching photo: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+
+	u := uploader.NewUploader(m.rawClient)
+	inputFile, err := u.FromBytes(ctx, "speedtest.png", data)
+	if err != nil {
+		return 0, err
+	}
+
+	plainText, entities := ParseFormatting(caption)
+	mediaReq := &tg.MessagesSendMediaRequest{
+		Peer: peer,
+		Media: &tg.InputMediaUploadedPhoto{
+			File: inputFile,
+		},
+		Message:  plainText,
+		Entities: entities,
+		RandomID: time.Now().UnixNano(),
+	}
+	if replyToID != 0 {
+		mediaReq.ReplyTo = &tg.InputReplyToMessage{
+			ReplyToMsgID: replyToID,
+		}
+	}
+
+	updates, err := m.rawClient.MessagesSendMedia(ctx, mediaReq)
+	if err != nil {
+		log.Printf("[AZML-Go Bot Client] Error sending photo: %v", err)
+		return 0, err
+	}
+	return ExtractMessageID(updates), nil
 }
 
 func (m *MessageSender) AutoDeleteMessage(peer tg.InputPeerClass, msgID int, seconds int) {

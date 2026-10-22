@@ -69,7 +69,7 @@ func main() {
 
 	statusMod := modules.NewStatusModule(sender)
 	leechMod := modules.NewLeechModule(app.GetRawAPI(), sender, uploader, userMap, statusMod)
-	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap)
+	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap, statusMod)
 	cancelMod := modules.NewCancelModule(sender, userMap)
 	settingsMod := modules.NewSettingsModule(sender, userMap)
 	botSetMod := modules.NewBotSettingsModule(sender, userMap)

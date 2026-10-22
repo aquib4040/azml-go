@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -79,6 +80,18 @@ func (m *TaskManager) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.tasks)
+}
+
+func (m *TaskManager) CountUserTasks(userID int64) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, t := range m.tasks {
+		if t.UserID() == userID {
+			count++
+		}
+	}
+	return count
 }
 
 func (m *TaskManager) GetTotalPages() int {
@@ -300,6 +313,154 @@ func (q *QueueTask) Cancel() error {
 	}
 	ReleaseFromQueue(q.gid)
 	return nil
+}
+
+// UnifiedTask tracks the entire lifecycle of a leech task across all phases
+type UnifiedTask struct {
+	gid        string
+	name       string
+	size       int64
+	downloaded int64
+	speed      float64
+	eta        string
+	progress   float64
+	status     types.TaskStatus
+	engine     string
+	startTime  time.Time
+	messageID  int
+	chatID     int64
+	userID     int64
+	cancelFn   context.CancelFunc
+	mu         sync.RWMutex
+}
+
+func NewUnifiedTask(gid, name string, size int64, chatID, userID int64, msgID int, cancelFn context.CancelFunc) *UnifiedTask {
+	cleanName := name
+	if cleanName != "" {
+		cleanName = filepath.Base(cleanName)
+	}
+	return &UnifiedTask{
+		gid:       gid,
+		name:      cleanName,
+		size:      size,
+		status:    types.StatusDownloading,
+		engine:    "Aria2c [MaxSpeed 16c]",
+		startTime: time.Now(),
+		chatID:    chatID,
+		userID:    userID,
+		messageID: msgID,
+		cancelFn:  cancelFn,
+		eta:       "-",
+	}
+}
+
+func (u *UnifiedTask) GID() string { return u.gid }
+func (u *UnifiedTask) Name() string {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.name
+}
+func (u *UnifiedTask) Size() int64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.size
+}
+func (u *UnifiedTask) DownloadedBytes() int64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.downloaded
+}
+func (u *UnifiedTask) Speed() float64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.speed
+}
+func (u *UnifiedTask) ETA() string {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.eta
+}
+func (u *UnifiedTask) Progress() float64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.progress
+}
+func (u *UnifiedTask) Status() types.TaskStatus {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.status
+}
+func (u *UnifiedTask) Engine() string {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.engine
+}
+func (u *UnifiedTask) StartTime() time.Time { return u.startTime }
+func (u *UnifiedTask) MessageID() int       { return u.messageID }
+func (u *UnifiedTask) ChatID() int64        { return u.chatID }
+func (u *UnifiedTask) UserID() int64        { return u.userID }
+
+func (u *UnifiedTask) Cancel() error {
+	u.mu.Lock()
+	u.status = types.StatusPaused
+	cancel := u.cancelFn
+	u.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
+func (u *UnifiedTask) SetProgress(downloaded, size int64, speed float64, eta string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.downloaded = downloaded
+	if size > 0 {
+		u.size = size
+	}
+	u.speed = speed
+	u.eta = eta
+	if u.size > 0 {
+		p := (float64(u.downloaded) / float64(u.size)) * 100
+		if p > 100 {
+			p = 100
+		}
+		u.progress = p
+	}
+}
+
+func (u *UnifiedTask) SetStatus(status types.TaskStatus, engine string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.status = status
+	if engine != "" {
+		u.engine = engine
+	}
+}
+
+func (u *UnifiedTask) SetEngine(engine string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if engine != "" {
+		u.engine = engine
+	}
+}
+
+func (u *UnifiedTask) SetName(name string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	clean := filepath.Base(name)
+	if clean != "" && clean != "." && clean != "/" {
+		u.name = clean
+	}
+}
+
+func (u *UnifiedTask) SetSize(size int64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if size > 0 {
+		u.size = size
+	}
 }
 
 // AcquireDownloadQueue checks whether a task needs to be queued for downloading.
