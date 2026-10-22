@@ -107,37 +107,12 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	}
 
 	var thumbFile tg.InputFileClass
-	var coverPhoto tg.InputPhotoClass
-
 	// Upload Legacy Thumbnail (320x320)
 	if opt.ThumbPath != "" {
 		if thumbHandle, tErr := uploader.NewUploader(clientToUse).FromPath(ctx, opt.ThumbPath); tErr == nil {
 			thumbFile = thumbHandle
-		}
-	}
-
-	// Upload Modern MTProto HD VideoCover (thumb=cover)
-	if isVideoExt(strings.ToLower(filepath.Ext(opt.FilePath))) && !opt.AsDoc {
-		targetCoverPath := opt.CoverPath
-		if targetCoverPath == "" {
-			targetCoverPath = opt.ThumbPath
-		}
-		if targetCoverPath != "" {
-			if coverHandle, cErr := uploader.NewUploader(clientToUse).FromPath(ctx, targetCoverPath); cErr == nil {
-				uploadMediaReq := &tg.MessagesUploadMediaRequest{
-					Peer: peer,
-					Media: &tg.InputMediaUploadedPhoto{
-						File: coverHandle,
-					},
-				}
-				if mediaRes, mErr := clientToUse.MessagesUploadMedia(ctx, uploadMediaReq); mErr == nil {
-					if mediaPhoto, ok := mediaRes.(*tg.MessageMediaPhoto); ok {
-						if photo, ok := mediaPhoto.Photo.(*tg.Photo); ok {
-							coverPhoto = photo.AsInput()
-						}
-					}
-				}
-			}
+		} else {
+			log.Printf("[AZML-Go Uploader] Failed to upload thumb: %v", tErr)
 		}
 	}
 
@@ -199,11 +174,13 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		MimeType:   mimeType,
 		Attributes: attributes,
 	}
-	if coverPhoto != nil {
-		inputMedia.SetVideoCover(coverPhoto)
-	}
 
 	plainCaption, captionEntities := telegram.ParseFormatting(opt.Caption)
+	if len(plainCaption) > 1024 {
+		plainCaption = plainCaption[:1020] + "..."
+		plainCaption, captionEntities = telegram.ParseFormatting(plainCaption)
+	}
+
 	req := &tg.MessagesSendMediaRequest{
 		Peer:     peer,
 		Media:    inputMedia,
@@ -214,33 +191,48 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	res, err := clientToUse.MessagesSendMedia(ctx, req)
 	if err != nil {
+		log.Printf("[AZML-Go Uploader] MessagesSendMedia FAILED for %s (%d bytes) to peer %T: %v", opt.FileName, fileSize, peer, err)
 		return nil, fmt.Errorf("failed to send uploaded media: %v", err)
 	}
+	log.Printf("[AZML-Go Uploader] Successfully sent uploaded media for %s to peer %T!", opt.FileName, peer)
 
-	// Mirror to Dump chat if configured
-	if opt.DumpChatID != 0 {
-		dumpPeer := &tg.InputPeerChannel{
-			ChannelID: getChannelID(opt.DumpChatID),
+	msgID := telegram.ExtractMessageID(res)
+	if msgID > 0 {
+		// Forward to Dump chat if configured
+		if opt.DumpChatID != 0 {
+			chID := getChannelID(opt.DumpChatID)
+			dumpPeer := &tg.InputPeerChannel{
+				ChannelID:  chID,
+				AccessHash: telegram.GetChannelAccessHash(chID),
+			}
+			_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+				FromPeer: peer,
+				ToPeer:   dumpPeer,
+				ID:       []int{msgID},
+				RandomID: []int64{time.Now().UnixNano() + 1},
+			})
+			if fErr != nil {
+				log.Printf("[AZML-Go Uploader] Forward to dump failed: %v", fErr)
+			}
 		}
-		_, _ = clientToUse.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer:     dumpPeer,
-			Media:    inputMedia,
-			Message:  opt.Caption,
-			RandomID: time.Now().UnixNano() + 1,
-		})
-	}
 
-	// Mirror to Leech Log channel if configured
-	if opt.LogChatID != 0 {
-		logPeer := &tg.InputPeerChannel{
-			ChannelID: getChannelID(opt.LogChatID),
+		// Forward to Leech Log channel if configured
+		if opt.LogChatID != 0 {
+			chID := getChannelID(opt.LogChatID)
+			logPeer := &tg.InputPeerChannel{
+				ChannelID:  chID,
+				AccessHash: telegram.GetChannelAccessHash(chID),
+			}
+			_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+				FromPeer: peer,
+				ToPeer:   logPeer,
+				ID:       []int{msgID},
+				RandomID: []int64{time.Now().UnixNano() + 2},
+			})
+			if fErr != nil {
+				log.Printf("[AZML-Go Uploader] Forward to leech log failed: %v", fErr)
+			}
 		}
-		_, _ = clientToUse.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer:     logPeer,
-			Media:    inputMedia,
-			Message:  fmt.Sprintf("📂 <b>Leech Log:</b>\n%s", opt.Caption),
-			RandomID: time.Now().UnixNano() + 2,
-		})
 	}
 
 	return &res, nil

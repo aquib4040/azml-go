@@ -17,11 +17,28 @@ import (
 type SysMemoryInfo struct {
 	ProcessAlloc string
 	ProcessSys   string
+	AppRAMMB     float64
 	OSUsed       string
 	OSFree       string
 	OSTotal      string
 	OSPercent    float64
 	ProgressBar  string
+}
+
+// GetAppMemoryUsageMB returns the real RSS/memory used by azml-go in MB
+func GetAppMemoryUsageMB() float64 {
+	if data, err := os.ReadFile("/proc/self/statm"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 2 {
+			if rssPages, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				pageSize := int64(os.Getpagesize())
+				return float64(rssPages*pageSize) / (1024 * 1024)
+			}
+		}
+	}
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	return float64(mem.Sys) / (1024 * 1024)
 }
 
 func GetProgressBarString(pct float64) string {
@@ -93,6 +110,7 @@ func GetMemoryStats() SysMemoryInfo {
 	return SysMemoryInfo{
 		ProcessAlloc: procAllocStr,
 		ProcessSys:   procSysStr,
+		AppRAMMB:     GetAppMemoryUsageMB(),
 		OSUsed:       formatBytes(usedOS),
 		OSFree:       formatBytes(freeOS),
 		OSTotal:      formatBytes(totalOS),
@@ -199,10 +217,13 @@ func RenderBotStats(startTime time.Time) string {
 	// Disk I/O
 	diskRead, diskWrite := getDiskIOCounters()
 
+	appRAM := GetAppMemoryUsageMB()
+
 	return fmt.Sprintf("⌬ <b><i>BOT STATISTICS :</i></b>\n"+
 		"┖ <b>Bot Uptime :</b> %s\n\n"+
 		"┎ <b><i>RAM ( MEMORY ) :</i></b>\n"+
 		"┃ %s %.1f%%\n"+
+		"┠ <b>App RAM (AZML-Go) :</b> <code>%.1f MB</code>\n"+
 		"┖ <b>U :</b> %s | <b>F :</b> %s | <b>T :</b> %s\n\n"+
 		"┎ <b><i>SWAP MEMORY :</i></b>\n"+
 		"┃ %s %.1f%%\n"+
@@ -214,6 +235,7 @@ func RenderBotStats(startTime time.Time) string {
 		"┖ <b>U :</b> %s | <b>F :</b> %s | <b>T :</b> %s",
 		botUptime,
 		ramBar, ramPercent,
+		appRAM,
 		GetReadableFileSize(memUsed), GetReadableFileSize(memAvail), GetReadableFileSize(memTotal),
 		swapBar, swapPercent,
 		GetReadableFileSize(swapUsed), GetReadableFileSize(swapFree), GetReadableFileSize(swapTotal),

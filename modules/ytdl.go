@@ -3,6 +3,7 @@ package modules
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,7 +170,8 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 
 	_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
 	if upErr != nil {
-		_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Upload Failed:</b> %v", upErr), nil)
+		log.Printf("[AZML-Go Ytdl] Upload error for %s: %v", finalName, upErr)
+		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ <b>Upload Failed:</b> %v", upErr), msg.MessageID, nil)
 		return
 	}
 

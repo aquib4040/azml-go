@@ -632,7 +632,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 		_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
 		if upErr != nil {
-			_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Upload Failed:</b> %v", upErr), nil)
+			log.Printf("[AZML-Go Leech] Upload error for %s: %v", part, upErr)
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ <b>Upload Failed:</b> %v", upErr), msg.MessageID, nil)
 			return
 		}
 	}
