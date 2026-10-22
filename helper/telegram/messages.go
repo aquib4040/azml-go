@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -34,6 +35,7 @@ func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass,
 
 	updates, err := m.rawClient.MessagesSendMessage(ctx, req)
 	if err != nil {
+		log.Printf("[AZML-Go Bot Client] Error sending message to peer %T: %v", peer, err)
 		return nil, err
 	}
 	return &updates, nil
@@ -49,6 +51,9 @@ func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass,
 		req.ReplyMarkup = markup
 	}
 	_, err := m.rawClient.MessagesEditMessage(ctx, req)
+	if err != nil {
+		log.Printf("[AZML-Go Bot Client] Error editing message %d: %v", msgID, err)
+	}
 	return err
 }
 
@@ -56,6 +61,9 @@ func (m *MessageSender) DeleteMessage(ctx context.Context, peer tg.InputPeerClas
 	_, err := m.rawClient.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
 		ID: msgIDs,
 	})
+	if err != nil {
+		log.Printf("[AZML-Go Bot Client] Error deleting messages %v: %v", msgIDs, err)
+	}
 	return err
 }
 
@@ -77,5 +85,8 @@ func (m *MessageSender) AnswerCallback(ctx context.Context, queryID int64, text 
 		Message: text,
 		Alert:   alert,
 	})
+	if err != nil {
+		log.Printf("[AZML-Go Bot Client] Error answering callback %d: %v", queryID, err)
+	}
 	return err
 }

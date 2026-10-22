@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"azml-go/config"
@@ -22,12 +23,18 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+var (
+	accessHashMu     sync.RWMutex
+	userAccessHashes = make(map[int64]int64)
+)
+
 type BotApp struct {
 	client     *td.Client
 	rawAPI     *tg.Client
 	userClient *td.Client
 	userRawAPI *tg.Client
 	dispatcher tg.UpdateDispatcher
+	gaps       *updates.Manager
 	sender     *telegram.MessageSender
 	uploader   *uploader.TelegramUploader
 	userMap    *types.SafeUserMap
@@ -68,6 +75,63 @@ type BotApp struct {
 	gdSelectCbHandler   func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 }
 
+type botUpdateHandler struct {
+	app        *BotApp
+	dispatcher tg.UpdateDispatcher
+	gaps       *updates.Manager
+}
+
+func (h *botUpdateHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
+	switch upd := u.(type) {
+	case *tg.UpdateShortMessage:
+		log.Printf("[AZML-Go Bot Client] Received UpdateShortMessage from user %d: %q", upd.UserID, upd.Message)
+		msg := &tg.Message{
+			Out:       upd.Out,
+			Mentioned: upd.Mentioned,
+			ID:        upd.ID,
+			PeerID:    &tg.PeerUser{UserID: upd.UserID},
+			FromID:    &tg.PeerUser{UserID: upd.UserID},
+			Message:   upd.Message,
+			Date:      upd.Date,
+			ReplyTo:   upd.ReplyTo,
+			Entities:  upd.Entities,
+		}
+		h.app.routeMessage(ctx, msg, tg.Entities{
+			Users: map[int64]*tg.User{
+				upd.UserID: {
+					ID: upd.UserID,
+				},
+			},
+		})
+		return nil
+
+	case *tg.UpdateShortChatMessage:
+		log.Printf("[AZML-Go Bot Client] Received UpdateShortChatMessage from user %d in chat %d: %q", upd.FromID, upd.ChatID, upd.Message)
+		msg := &tg.Message{
+			Out:       upd.Out,
+			Mentioned: upd.Mentioned,
+			ID:        upd.ID,
+			PeerID:    &tg.PeerChat{ChatID: upd.ChatID},
+			FromID:    &tg.PeerUser{UserID: upd.FromID},
+			Message:   upd.Message,
+			Date:      upd.Date,
+			ReplyTo:   upd.ReplyTo,
+			Entities:  upd.Entities,
+		}
+		h.app.routeMessage(ctx, msg, tg.Entities{
+			Users: map[int64]*tg.User{
+				upd.FromID: {
+					ID: upd.FromID,
+				},
+			},
+		})
+		return nil
+
+	default:
+		return h.gaps.Handle(ctx, u)
+	}
+}
+
 func NewBotApp() *BotApp {
 	cfg := config.Get()
 	userMap := types.NewSafeUserMap()
@@ -77,9 +141,24 @@ func NewBotApp() *BotApp {
 		Handler: dispatcher,
 	})
 
+	app := &BotApp{
+		dispatcher: dispatcher,
+		gaps:       gaps,
+		userMap:    userMap,
+		startTime:  time.Now(),
+	}
+
+	handler := &botUpdateHandler{
+		app:        app,
+		dispatcher: dispatcher,
+		gaps:       gaps,
+	}
+
 	client := td.NewClient(cfg.TelegramAPI, cfg.TelegramHash, td.Options{
-		UpdateHandler: gaps,
+		UpdateHandler: handler,
 	})
+	app.client = client
+	app.rawAPI = client.API()
 
 	var userClient *td.Client
 	var userRawAPI *tg.Client
@@ -93,16 +172,8 @@ func NewBotApp() *BotApp {
 			log.Printf("[AZML-Go User Client] Failed to parse USER_SESSION_STRING: %v", err)
 		}
 	}
-
-	app := &BotApp{
-		client:     client,
-		rawAPI:     client.API(),
-		userClient: userClient,
-		userRawAPI: userRawAPI,
-		dispatcher: dispatcher,
-		userMap:    userMap,
-		startTime:  time.Now(),
-	}
+	app.userClient = userClient
+	app.userRawAPI = userRawAPI
 
 	app.sender = telegram.NewMessageSender(app.rawAPI)
 	app.uploader = uploader.NewTelegramUploader(app.rawAPI, app.userRawAPI)
@@ -194,44 +265,38 @@ func (b *BotApp) registerDispatcher() {
 }
 
 func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.Entities) {
-	peer := getPeer(m.PeerID)
+	peer := b.getPeerWithEntities(m.PeerID, entities)
 	if peer == nil {
+		log.Printf("[AZML-Go Bot Client] Could not resolve peer for msg %d", m.ID)
 		return
 	}
 
-	senderID := int64(0)
+	chatID := getPeerID(m.PeerID)
+	senderID := chatID
 	senderName := "User"
+
 	if m.FromID != nil {
 		if uPeer, ok := m.FromID.(*tg.PeerUser); ok {
 			senderID = uPeer.UserID
 			if uObj, exists := entities.Users[senderID]; exists {
 				senderName = uObj.FirstName
+				b.cacheAccessHash(senderID, uObj.AccessHash)
 			}
 		}
-	}
-
-	// Blacklist check
-	if telegram.IsBlacklisted(senderID, b.userMap) {
-		return
-	}
-
-	// Authorization check
-	chatID := getPeerID(m.PeerID)
-	if !telegram.IsAuthorized(chatID, senderID, b.userMap) {
-		return
-	}
-
-	// Handle media attachments (Private Files: token.pickle, config.env, cookies.txt, accounts.zip; or Custom Thumbnails)
-	if m.Media != nil {
-		if b.handleIncomingMedia(ctx, peer, m, senderID, chatID) {
-			return
+	} else if uPeer, ok := m.PeerID.(*tg.PeerUser); ok {
+		senderID = uPeer.UserID
+		if uObj, exists := entities.Users[senderID]; exists {
+			senderName = uObj.FirstName
+			b.cacheAccessHash(senderID, uObj.AccessHash)
 		}
 	}
 
-	text := m.Message
-	if text == "" {
+	text := strings.TrimSpace(m.Message)
+	if text == "" && m.Media == nil {
 		return
 	}
+
+	log.Printf("[AZML-Go Bot Client] Routing message from user %d (%s) in chat %d: %q", senderID, senderName, chatID, text)
 
 	msgCtx := &types.MessageContext{
 		ChatID:     chatID,
@@ -248,14 +313,53 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		}
 	}
 
+	// 1. PUBLIC COMMANDS: /start, /ping, /help (Always answered regardless of authorization)
+	if telegram.MatchCommand(text, telegram.BotCommands.Start) {
+		log.Printf("[AZML-Go Bot Client] Executing /start for user %d", senderID)
+		if b.startHandler != nil {
+			b.startHandler(ctx, peer, msgCtx)
+		}
+		return
+	}
+	if telegram.MatchCommand(text, telegram.BotCommands.Ping) {
+		log.Printf("[AZML-Go Bot Client] Executing /ping for user %d", senderID)
+		if b.pingHandler != nil {
+			b.pingHandler(ctx, peer, msgCtx)
+		}
+		return
+	}
+	if telegram.MatchCommand(text, telegram.BotCommands.Help) {
+		log.Printf("[AZML-Go Bot Client] Executing /help for user %d", senderID)
+		if b.helpHandler != nil {
+			b.helpHandler(ctx, peer, msgCtx)
+		}
+		return
+	}
+
+	// 2. Blacklist check
+	if telegram.IsBlacklisted(senderID, b.userMap) {
+		log.Printf("[AZML-Go Bot Client] User %d is blacklisted, ignoring message", senderID)
+		return
+	}
+
+	// 3. Authorization check for leech, admin, settings, and task commands
+	if !telegram.IsAuthorized(chatID, senderID, b.userMap) {
+		log.Printf("[AZML-Go Bot Client] Unauthorized access by user %d in chat %d (Owner ID: %d)", senderID, chatID, config.Get().OwnerID)
+		_, _ = b.sender.SendMessage(ctx, peer, "⚠️ <b>Access Denied!</b>\nYou are not authorized to use this bot.\nContact the bot owner to get authorization.", m.ID, nil)
+		return
+	}
+
+	// 4. Handle media attachments (Private Files: token.pickle, config.env, cookies.txt, accounts.zip; or Custom Thumbnails)
+	if m.Media != nil {
+		if b.handleIncomingMedia(ctx, peer, m, senderID, chatID) {
+			return
+		}
+	}
+
 	isCancel, _ := telegram.MatchCancelCommand(text)
 
 	// Dispatch commands
 	switch {
-	case telegram.MatchCommand(text, telegram.BotCommands.Start):
-		if b.startHandler != nil {
-			b.startHandler(ctx, peer, msgCtx)
-		}
 	case telegram.MatchCommand(text, telegram.BotCommands.Leech):
 		isZip := strings.Contains(strings.ToLower(text), "zip") && !strings.Contains(strings.ToLower(text), "unzip")
 		isUnzip := strings.Contains(strings.ToLower(text), "unzip")
@@ -464,6 +568,16 @@ func (b *BotApp) Start(ctx context.Context) error {
 		// Register all bot commands in Telegram's autocomplete list
 		b.registerBotCommands(ctx)
 
+		// Start updates manager in background
+		if botSelf != nil {
+			go func() {
+				log.Printf("[AZML-Go Bot Client] Starting updates manager for bot user ID %d...", botSelf.ID)
+				if err := b.gaps.Run(ctx, b.rawAPI, botSelf.ID, updates.AuthOptions{IsBot: true}); err != nil && err != context.Canceled {
+					log.Printf("[AZML-Go Bot Client] Updates manager stopped: %v", err)
+				}
+			}()
+		}
+
 		// Ensure Aria2c is up with 16 connections
 		_ = ext.DB.LoadAllUsers(b.userMap)
 		log.Println("[AZML-Go Bot Client] AZML-Go started and listening for commands!")
@@ -571,10 +685,44 @@ func (b *BotApp) registerBotCommands(ctx context.Context) {
 	}
 }
 
+func (b *BotApp) cacheAccessHash(userID, hash int64) {
+	if hash == 0 {
+		return
+	}
+	accessHashMu.Lock()
+	userAccessHashes[userID] = hash
+	accessHashMu.Unlock()
+}
+
+func (b *BotApp) getPeerWithEntities(p tg.PeerClass, entities tg.Entities) tg.InputPeerClass {
+	switch v := p.(type) {
+	case *tg.PeerUser:
+		if u, ok := entities.Users[v.UserID]; ok && u.AccessHash != 0 {
+			b.cacheAccessHash(u.ID, u.AccessHash)
+			return u.AsInputPeer()
+		}
+		accessHashMu.RLock()
+		hash := userAccessHashes[v.UserID]
+		accessHashMu.RUnlock()
+		return &tg.InputPeerUser{UserID: v.UserID, AccessHash: hash}
+	case *tg.PeerChat:
+		return &tg.InputPeerChat{ChatID: v.ChatID}
+	case *tg.PeerChannel:
+		if ch, ok := entities.Channels[v.ChannelID]; ok && ch.AccessHash != 0 {
+			return ch.AsInputPeer()
+		}
+		return &tg.InputPeerChannel{ChannelID: v.ChannelID}
+	}
+	return nil
+}
+
 func getPeer(p tg.PeerClass) tg.InputPeerClass {
 	switch v := p.(type) {
 	case *tg.PeerUser:
-		return &tg.InputPeerUser{UserID: v.UserID}
+		accessHashMu.RLock()
+		hash := userAccessHashes[v.UserID]
+		accessHashMu.RUnlock()
+		return &tg.InputPeerUser{UserID: v.UserID, AccessHash: hash}
 	case *tg.PeerChat:
 		return &tg.InputPeerChat{ChatID: v.ChatID}
 	case *tg.PeerChannel:
