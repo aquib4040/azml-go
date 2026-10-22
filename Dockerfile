@@ -6,6 +6,7 @@ WORKDIR /usr/src/app
 
 COPY . .
 
+RUN cp ./azml-go-linux /usr/local/bin/azml-go && chmod a+rx /usr/local/bin/azml-go
 
 EXPOSE 23434
 
