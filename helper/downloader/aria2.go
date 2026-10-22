@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -35,16 +36,25 @@ type Aria2File struct {
 	Selected        string `json:"selected"`
 }
 
+type Aria2BTInfo struct {
+	Info struct {
+		Name string `json:"name"`
+	} `json:"info"`
+}
+
 type Aria2StatusResponse struct {
-	GID             string      `json:"gid"`
-	Status          string      `json:"status"` // "active", "waiting", "paused", "error", "complete", "removed"
-	TotalLength     string      `json:"totalLength"`
-	CompletedLength string      `json:"completedLength"`
-	UploadSpeed     string      `json:"uploadSpeed"`
-	DownloadSpeed   string      `json:"downloadSpeed"`
-	ErrorMessage    string      `json:"errorMessage"`
-	Dir             string      `json:"dir"`
-	Files           []Aria2File `json:"files"`
+	GID             string          `json:"gid"`
+	Status          string          `json:"status"` // "active", "waiting", "paused", "error", "complete", "removed"
+	TotalLength     string          `json:"totalLength"`
+	CompletedLength string          `json:"completedLength"`
+	UploadSpeed     string          `json:"uploadSpeed"`
+	DownloadSpeed   string          `json:"downloadSpeed"`
+	ErrorMessage    string          `json:"errorMessage"`
+	Dir             string          `json:"dir"`
+	Files           []Aria2File     `json:"files"`
+	FollowedBy      []string        `json:"followedBy"`
+	Following       string          `json:"following"`
+	Bittorrent      *Aria2BTInfo    `json:"bittorrent"`
 }
 
 type JSONRPCRequest struct {
@@ -107,6 +117,17 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 	} else if _, err := os.Stat("/usr/bin/studymaterial"); err == nil {
 		binName = "/usr/bin/studymaterial"
 	}
+	defaultTrackers := "udp://tracker.opentrackr.org:1337/announce," +
+		"udp://open.stealth.si:80/announce," +
+		"udp://tracker.torrent.eu.org:451/announce," +
+		"udp://tracker.openbittorrent.com:6969/announce," +
+		"udp://explodie.org:6969/announce," +
+		"udp://tracker.moeking.me:6969/announce," +
+		"udp://p4p.arenabg.com:1337/announce," +
+		"udp://tracker.tiny-vps.com:6969/announce," +
+		"http://tracker.opentrackr.org:1337/announce," +
+		"http://tracker.openbittorrent.com:80/announce"
+
 	cmd := exec.Command(binName,
 		"--enable-rpc",
 		"--rpc-listen-all=true",
@@ -117,7 +138,7 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--max-concurrent-downloads=10",
 		"--piece-length=1M",
 		"--allow-overwrite=true",
-		"--auto-file-renaming=false",
+		"--auto-file-renaming=true",
 		"--summary-interval=1",
 		"--disk-cache=64M",
 		"--bt-max-peers=128",
@@ -128,6 +149,12 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--bt-require-crypto=true",
 		"--bt-min-crypto-level=arc4",
 		"--enable-dht=true",
+		"--dht-listen-port=6881",
+		"--bt-enable-lpd=true",
+		"--follow-torrent=mem",
+		"--bt-tracker="+defaultTrackers,
+		"--peer-id-prefix=-qB4520-",
+		"--peer-agent=qBittorrent/4.5.2",
 		"--daemon=true",
 	)
 
@@ -163,15 +190,17 @@ func (a *Aria2RPCClient) AddURI(link, downloadDir, filename string, headers []st
 	_ = os.MkdirAll(downloadDir, 0755)
 
 	opts := map[string]interface{}{
-		"dir":                        downloadDir,
-		"max-connection-per-server":  "16",
-		"split":                      "16",
-		"min-split-size":             "1M",
-		"allow-overwrite":            "true",
-		"check-certificate":          "false",
-		"bt-max-peers":               "128",
+		"dir":                         downloadDir,
+		"max-connection-per-server":   "16",
+		"split":                       "16",
+		"min-split-size":              "1M",
+		"allow-overwrite":             "true",
+		"check-certificate":           "false",
+		"bt-max-peers":                "128",
 		"bt-request-peer-speed-limit": "0",
-		"seed-time":                  "0",
+		"seed-time":                   "0",
+		"seed-ratio":                  "0.0",
+		"follow-torrent":              "mem",
 	}
 
 	if filename != "" {
@@ -432,10 +461,41 @@ func (t *Aria2DownloadTask) PollUntilComplete(ctx context.Context, onProgress fu
 				onProgress(cur, tot)
 			}
 
+			// If this download spawned a follow-up download (e.g. torrent metadata completed -> payload started)
+			if len(res.FollowedBy) > 0 {
+				newGID := res.FollowedBy[0]
+				log.Printf("[Aria2c] Torrent followed: GID %s -> %s", t.gid, newGID)
+				t.mu.Lock()
+				t.gid = newGID
+				t.mu.Unlock()
+				continue
+			}
+
 			switch res.Status {
 			case "complete":
+				// If followedBy is present on completion, switch to payload
+				if len(res.FollowedBy) > 0 {
+					newGID := res.FollowedBy[0]
+					log.Printf("[Aria2c] Torrent followed on complete: GID %s -> %s", t.gid, newGID)
+					t.mu.Lock()
+					t.gid = newGID
+					t.mu.Unlock()
+					continue
+				}
+
 				t.mu.Lock()
 				t.status = types.StatusExtracting
+				// If Bittorrent info name exists, determine if folder or single file
+				if res.Bittorrent != nil && res.Bittorrent.Info.Name != "" {
+					candidate := filepath.Join(res.Dir, res.Bittorrent.Info.Name)
+					if _, err := os.Stat(candidate); err == nil {
+						t.downloadPath = candidate
+						t.name = res.Bittorrent.Info.Name
+					}
+				}
+				if t.downloadPath == "" && len(res.Files) > 0 {
+					t.downloadPath = res.Files[0].Path
+				}
 				path := t.downloadPath
 				t.mu.Unlock()
 				// Immediately sever all peer connections & remove torrent to prevent any seeding

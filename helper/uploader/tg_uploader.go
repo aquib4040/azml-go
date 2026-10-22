@@ -101,7 +101,18 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		WithThreads(8).
 		WithProgress(tracker)
 
-	uploadedFile, err := up.FromPath(ctx, opt.FilePath)
+	var uploadedFile tg.InputFileClass
+	for attempt := 1; attempt <= 3; attempt++ {
+		uploadedFile, err = up.FromPath(ctx, opt.FilePath)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("upload cancelled: %v", ctx.Err())
+		}
+		log.Printf("[AZML-Go Uploader] Upload attempt %d failed for %s: %v. Retrying in 2 seconds...", attempt, opt.FileName, err)
+		time.Sleep(2 * time.Second)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload file parts: %v", err)
 	}

@@ -1,11 +1,13 @@
 package ext
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -165,4 +167,36 @@ func ParseTagInfo(text, botName string) (tagStr, idStr, cleanedText string) {
 func TimeSinceFormatted(t time.Time) string {
 	diff := time.Since(t)
 	return GetReadableTime(int64(diff.Seconds()))
+}
+
+// DownloadHTTPFile downloads a remote file directly to destPath using browser-grade headers
+func DownloadHTTPFile(ctx context.Context, urlStr, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Referer", urlStr)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad HTTP status: %d", resp.StatusCode)
+	}
+
+	_ = os.MkdirAll(filepath.Dir(destPath), 0755)
+	out, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
 }

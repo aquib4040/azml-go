@@ -384,33 +384,101 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			}
 		}
 		downloadedPath, dlErr = megaDl.Download(ctx, link, taskDir, nil)
-	} else if ext.IsMagnet(link) || strings.HasSuffix(link, ".torrent") || ext.IsURL(link) {
-		// All torrents, magnets, and DDL links are routed through Aria2c with 16 connections
+	} else if ext.IsMagnet(link) || strings.Contains(strings.ToLower(link), ".torrent") || ext.IsURL(link) || (func() bool { fi, err := os.Stat(link); return err == nil && !fi.IsDir() }()) {
+		cleanLink := strings.Split(strings.TrimSpace(link), "?")[0]
+		isLocalTorrent := false
+		if fi, err := os.Stat(link); err == nil && !fi.IsDir() && strings.HasSuffix(strings.ToLower(link), ".torrent") {
+			isLocalTorrent = true
+		}
+		isRemoteTorrent := ext.IsURL(link) && strings.HasSuffix(strings.ToLower(cleanLink), ".torrent")
+
 		aria := downloader.GetAria2Client()
-		gid, err := aria.AddURI(link, taskDir, opt.CustomName, nil)
-		if err != nil {
-			_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Download Error:</b> %v", err), nil)
-			return
-		}
 
-		if opt.Select {
-			cfg := config.Get()
-			baseURL := cfg.BaseURL
-			if baseURL == "" {
-				baseURL = fmt.Sprintf("http://localhost:%d", cfg.BaseURLPort)
+		if isLocalTorrent {
+			log.Printf("[LEECH] Adding local .torrent file to Aria2c: %s", link)
+			gid, err := aria.AddTorrent(link, taskDir)
+			if err != nil {
+				_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Torrent Error:</b> %v", err), nil)
+				return
 			}
-			b := telegram.NewButtonMaker()
-			b.UButton("Select Files", fmt.Sprintf("%s/app/files/%s", strings.TrimSuffix(baseURL, "/"), gid))
-			_ = m.sender.EditMessage(ctx, peer, notifyID, "Your torrent download paused. Choose files from selection web link then press Confirm on web page.", b.BuildMenu(1))
-		}
+			task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
+			downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+				uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+				if task.Name() != "" {
+					uTask.SetName(task.Name())
+				}
+			})
+		} else if isRemoteTorrent {
+			log.Printf("[LEECH] Downloading remote .torrent metadata: %s", link)
+			torrentDest := filepath.Join(taskDir, fmt.Sprintf("source_%d.torrent", time.Now().UnixNano()))
+			if err := ext.DownloadHTTPFile(ctx, link, torrentDest); err == nil {
+				gid, tErr := aria.AddTorrent(torrentDest, taskDir)
+				if tErr == nil {
+					_ = os.Remove(torrentDest)
+					task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
+					downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+						uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+						if task.Name() != "" {
+							uTask.SetName(task.Name())
+						}
+					})
+				} else {
+					log.Printf("[LEECH] AddTorrent error, fallback to AddURI: %v", tErr)
+					gid, aErr := aria.AddURI(link, taskDir, opt.CustomName, nil)
+					if aErr != nil {
+						_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Download Error:</b> %v", aErr), nil)
+						return
+					}
+					task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
+					downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+						uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+						if task.Name() != "" {
+							uTask.SetName(task.Name())
+						}
+					})
+				}
+			} else {
+				log.Printf("[LEECH] DownloadHTTPFile error, fallback to AddURI: %v", err)
+				gid, aErr := aria.AddURI(link, taskDir, opt.CustomName, nil)
+				if aErr != nil {
+					_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Download Error:</b> %v", aErr), nil)
+					return
+				}
+				task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
+				downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+					uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+					if task.Name() != "" {
+						uTask.SetName(task.Name())
+					}
+				})
+			}
+		} else {
+			// All other magnets, torrents, and DDL links are routed through Aria2c with 16 connections
+			gid, err := aria.AddURI(link, taskDir, opt.CustomName, nil)
+			if err != nil {
+				_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Download Error:</b> %v", err), nil)
+				return
+			}
 
-		task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
-		downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
-			uTask.SetProgress(cur, total, task.Speed(), task.ETA())
-			if task.Name() != "" {
-				uTask.SetName(task.Name())
+			if opt.Select {
+				cfg := config.Get()
+				baseURL := cfg.BaseURL
+				if baseURL == "" {
+					baseURL = fmt.Sprintf("http://localhost:%d", cfg.BaseURLPort)
+				}
+				b := telegram.NewButtonMaker()
+				b.UButton("Select Files", fmt.Sprintf("%s/app/files/%s", strings.TrimSuffix(baseURL, "/"), gid))
+				_ = m.sender.EditMessage(ctx, peer, notifyID, "Your torrent download paused. Choose files from selection web link then press Confirm on web page.", b.BuildMenu(1))
 			}
-		})
+
+			task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
+			downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+				uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+				if task.Name() != "" {
+					uTask.SetName(task.Name())
+				}
+			})
+		}
 	} else {
 		// Fallback Direct HTTP
 		directDl := downloader.NewDirectDownloader()
@@ -428,6 +496,30 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		return
 	}
 	ext.ReleaseDownload(taskUID)
+
+	// Critical safeguard: If downloadedPath is a .torrent file, automatically extract and download its real payload!
+	if strings.HasSuffix(strings.ToLower(downloadedPath), ".torrent") {
+		log.Printf("[LEECH] Downloaded file is a .torrent file (%s), starting real payload download...", downloadedPath)
+		torrentFile := downloadedPath
+		_ = m.sender.EditMessage(ctx, peer, notifyID, "<i>Processing .torrent metadata & starting payload download...</i>", nil)
+		aria := downloader.GetAria2Client()
+		gid, err := aria.AddTorrent(torrentFile, taskDir)
+		if err == nil {
+			_ = os.Remove(torrentFile)
+			task := downloader.NewAria2DownloadTask(gid, opt.CustomName, taskDir, notifyID, msg.ChatID, msg.UserID)
+			downloadedPath, dlErr = task.PollUntilComplete(ctx, func(cur, total int64) {
+				uTask.SetProgress(cur, total, task.Speed(), task.ETA())
+				if task.Name() != "" {
+					uTask.SetName(task.Name())
+				}
+			})
+			if dlErr != nil {
+				_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>Torrent Download Failed:</b> %v", dlErr), nil)
+				return
+			}
+		}
+	}
+
 	displayName = filepath.Base(downloadedPath)
 	uTask.SetName(displayName)
 	if fi, err := os.Stat(downloadedPath); err == nil && !fi.IsDir() {
@@ -500,89 +592,36 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 
 	// 3. Post-processing: Metadata editing
-	if user != nil && len(user.Metadata) > 0 {
-		uTask.SetStatus(types.StatusFFmpeg, "FFmpeg")
-		outMeta := filepath.Join(taskDir, "meta_"+filepath.Base(downloadedPath))
-		if err := ext.EditMetadata(downloadedPath, outMeta, user.Metadata); err == nil {
-			_ = os.Remove(downloadedPath)
-			downloadedPath = outMeta
-		}
+	// Collect all files to process: single file or directory of files
+	var filesToUpload []string
+	if fi, err := os.Stat(downloadedPath); err == nil && fi.IsDir() {
+		_ = filepath.Walk(downloadedPath, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				base := filepath.Base(path)
+				if !strings.HasPrefix(base, ".") && !strings.HasSuffix(base, ".aria2") {
+					filesToUpload = append(filesToUpload, path)
+				}
+			}
+			return nil
+		})
+	} else {
+		filesToUpload = []string{downloadedPath}
 	}
 
-	// 4. File Renaming (AutoRename, Regex, Prefix, Suffix, Caption)
-	finalName, caption := ext.FormatFilename(filepath.Base(downloadedPath), user, downloadedPath)
-	if opt.CustomName != "" {
-		finalName = opt.CustomName
-	}
-	// Auto conversion of symbols like / and \ so no new directory gets created
-	finalName = ext.SanitizeFilename(finalName)
-	uTask.SetName(finalName)
-	renamedPath := filepath.Join(taskDir, finalName)
-	if renamedPath != downloadedPath {
-		_ = os.Rename(downloadedPath, renamedPath)
-		downloadedPath = renamedPath
-	}
-
-	// 5. Screenshots Generation
-	var ssLinks []string
-	if opt.Screenshots > 0 || cfg.ScreenshotsMode {
-		ssCount := opt.Screenshots
-		if ssCount <= 0 {
-			ssCount = 4
-		}
-		ssLinks, _ = ext.TakeScreenshots(downloadedPath, ssCount)
-	}
-
-	// 6. Thumbnail & HD Cover Generation (Custom Thumb, TMDB Auto Poster, or FFmpeg snapshot)
-	customThumb := ""
-	if user != nil && user.CustomThumb != "" {
-		customThumb = user.CustomThumb
-	}
-
-	autoThumbEnabled := cfg.AutoThumbnail
-	if user != nil && user.AutoThumb {
-		autoThumbEnabled = true
-	}
-
-	if customThumb == "" && autoThumbEnabled {
-		if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, opt.AsDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
-			customThumb = tmdbThumb
-		}
-	}
-
-	thumbPath := ext.GenerateThumbnail(downloadedPath, customThumb)
-	defer func() {
-		if thumbPath != "" && thumbPath != customThumb {
-			_ = os.Remove(thumbPath)
-		}
-	}()
-
-	// 7. File Splitting (1.91GB standard, 3.91GB for Telegram Premium userbot)
-	uTask.SetStatus(types.StatusSplitting, "7-Zip")
-	maxSplit := config.GetMaxSplitSize()
-	splitSize := cfg.LeechSplitSize
-	if user != nil && user.SplitSize > 0 {
-		splitSize = user.SplitSize
-	}
-	if splitSize > maxSplit || splitSize <= 0 {
-		splitSize = maxSplit
-	}
-
-	splitDir := filepath.Join(taskDir, "splits")
-	splitParts, splitErr := ext.SplitFile(downloadedPath, splitSize, splitDir)
-	if splitErr != nil || len(splitParts) == 0 {
-		splitParts = []string{downloadedPath}
-	}
-
-	// 8. Upload Phase via MTProto streaming
-	fi, _ := os.Stat(downloadedPath)
-	var uploadSize int64
-	if fi != nil {
-		uploadSize = fi.Size()
+	if len(filesToUpload) == 0 {
+		_ = m.sender.EditMessage(ctx, peer, notifyID, "❌ <b>Download Failed:</b> No payload files found", nil)
+		return
 	}
 
 	// Queue Check for Upload (Sleep v0 Engine)
-	queuedUP, qUpErr := ext.AcquireUploadQueue(ctx, taskUID, displayName, uploadSize, msg.ChatID, msg.UserID, notifyID, cancel)
+	var totalUploadSize int64
+	for _, f := range filesToUpload {
+		if fi, err := os.Stat(f); err == nil {
+			totalUploadSize += fi.Size()
+		}
+	}
+
+	queuedUP, qUpErr := ext.AcquireUploadQueue(ctx, taskUID, displayName, totalUploadSize, msg.ChatID, msg.UserID, notifyID, cancel)
 	if qUpErr != nil {
 		_ = m.sender.EditMessage(ctx, peer, notifyID, "❌ <i>Upload task cancelled while in queue</i>", nil)
 		return
@@ -595,10 +634,6 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	_ = m.sender.EditMessage(ctx, peer, notifyID, "<i>Uploading to Telegram...</i>", nil)
 
-	uTask.SetStatus(types.StatusUploading, "MTProto")
-	uTask.SetSize(uploadSize)
-	uTask.SetProgress(0, uploadSize, 0, "-")
-
 	dumpID := cfg.LeechLogID
 	if opt.UserDump != 0 {
 		dumpID = opt.UserDump
@@ -606,40 +641,120 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		dumpID = user.DumpChatID
 	}
 
-	for idx, part := range splitParts {
-		partCaption := caption
-		if len(splitParts) > 1 {
-			partCaption = fmt.Sprintf("<b>Part %d/%d</b>\n%s", idx+1, len(splitParts), caption)
-		}
-		if len(ssLinks) > 0 {
-			partCaption += fmt.Sprintf("\n\n📸 <a href=\"%s\">Screenshots</a>", ssLinks[0])
-		}
-
-		upOpt := uploader.UploadOptions{
-			FilePath:   part,
-			FileName:   filepath.Base(part),
-			Caption:    partCaption,
-			ThumbPath:  thumbPath,
-			CoverPath:  customThumb,
-			AsDoc:      opt.AsDoc || cfg.AsDocument,
-			DumpChatID: dumpID,
-			LogChatID:  cfg.LeechLogID,
-			IsPremium:  isPremium,
-			OnProgress: func(curr, total int64, speed float64, eta string) {
-				uTask.SetProgress(curr, total, speed, eta)
-			},
+	for _, curFile := range filesToUpload {
+		// Metadata editing
+		if user != nil && len(user.Metadata) > 0 {
+			uTask.SetStatus(types.StatusFFmpeg, "FFmpeg")
+			outMeta := filepath.Join(taskDir, "meta_"+filepath.Base(curFile))
+			if err := ext.EditMetadata(curFile, outMeta, user.Metadata); err == nil {
+				_ = os.Remove(curFile)
+				curFile = outMeta
+			}
 		}
 
-		_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
-		if upErr != nil {
-			log.Printf("[AZML-Go Leech] Upload error for %s: %v", part, upErr)
-			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ <b>Upload Failed:</b> %v", upErr), msg.MessageID, nil)
-			return
+		// File Renaming
+		finalName, caption := ext.FormatFilename(filepath.Base(curFile), user, curFile)
+		if opt.CustomName != "" && len(filesToUpload) == 1 {
+			finalName = opt.CustomName
 		}
+		finalName = ext.SanitizeFilename(finalName)
+		uTask.SetName(finalName)
+		renamedPath := filepath.Join(filepath.Dir(curFile), finalName)
+		if renamedPath != curFile {
+			_ = os.Rename(curFile, renamedPath)
+			curFile = renamedPath
+		}
+
+		// Screenshots
+		var ssLinks []string
+		if opt.Screenshots > 0 || cfg.ScreenshotsMode {
+			ssCount := opt.Screenshots
+			if ssCount <= 0 {
+				ssCount = 4
+			}
+			ssLinks, _ = ext.TakeScreenshots(curFile, ssCount)
+		}
+
+		// Thumbnail & HD Cover
+		customThumb := ""
+		if user != nil && user.CustomThumb != "" {
+			customThumb = user.CustomThumb
+		}
+		autoThumbEnabled := cfg.AutoThumbnail
+		if user != nil && user.AutoThumb {
+			autoThumbEnabled = true
+		}
+		if customThumb == "" && autoThumbEnabled {
+			if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, opt.AsDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
+				customThumb = tmdbThumb
+			}
+		}
+		thumbPath := ext.GenerateThumbnail(curFile, customThumb)
+
+		// File Splitting
+		uTask.SetStatus(types.StatusSplitting, "7-Zip")
+		maxSplit := config.GetMaxSplitSize()
+		splitSize := cfg.LeechSplitSize
+		if user != nil && user.SplitSize > 0 {
+			splitSize = user.SplitSize
+		}
+		if splitSize > maxSplit || splitSize <= 0 {
+			splitSize = maxSplit
+		}
+
+		splitDir := filepath.Join(taskDir, "splits")
+		splitParts, splitErr := ext.SplitFile(curFile, splitSize, splitDir)
+		if splitErr != nil || len(splitParts) == 0 {
+			splitParts = []string{curFile}
+		}
+
+		fi, _ := os.Stat(curFile)
+		var itemSize int64
+		if fi != nil {
+			itemSize = fi.Size()
+		}
+
+		uTask.SetStatus(types.StatusUploading, "MTProto")
+		uTask.SetSize(itemSize)
+		uTask.SetProgress(0, itemSize, 0, "-")
+
+		for idx, part := range splitParts {
+			partCaption := caption
+			if len(splitParts) > 1 {
+				partCaption = fmt.Sprintf("<b>Part %d/%d</b>\n%s", idx+1, len(splitParts), caption)
+			}
+			if len(ssLinks) > 0 {
+				partCaption += fmt.Sprintf("\n\n📸 <a href=\"%s\">Screenshots</a>", ssLinks[0])
+			}
+
+			upOpt := uploader.UploadOptions{
+				FilePath:   part,
+				FileName:   filepath.Base(part),
+				Caption:    partCaption,
+				ThumbPath:  thumbPath,
+				CoverPath:  customThumb,
+				AsDoc:      opt.AsDoc || cfg.AsDocument,
+				DumpChatID: dumpID,
+				LogChatID:  cfg.LeechLogID,
+				IsPremium:  isPremium,
+				OnProgress: func(curr, total int64, speed float64, eta string) {
+					uTask.SetProgress(curr, total, speed, eta)
+				},
+			}
+
+			_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
+			if upErr != nil {
+				log.Printf("[AZML-Go Leech] Upload error for %s: %v", part, upErr)
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ <b>Upload Failed:</b> %v", upErr), msg.MessageID, nil)
+				return
+			}
+		}
+
+		if thumbPath != "" && thumbPath != customThumb {
+			_ = os.Remove(thumbPath)
+		}
+		ext.RecordDailyUsage(msg.UserID, itemSize)
 	}
-
-	// Record daily usage upon successful upload
-	ext.RecordDailyUsage(msg.UserID, uploadSize)
 
 	if m.statusMod != nil {
 		m.statusMod.RemoveStatusMessage(msg.ChatID)
