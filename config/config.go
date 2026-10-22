@@ -80,9 +80,31 @@ type Config struct {
 }
 
 var (
-	GlobalConfig Config
-	configLock   sync.RWMutex
+	GlobalConfig  Config
+	configLock    sync.RWMutex
+	MaxSplitSize  int64 = 2097152000 // 1.91 GB default
+	IsPremiumUser bool  = false
 )
+
+func SetIsPremiumUser(isPrem bool) {
+	configLock.Lock()
+	defer configLock.Unlock()
+	IsPremiumUser = isPrem
+	if isPrem {
+		MaxSplitSize = 4194304000 // 3.91 GB
+	} else {
+		MaxSplitSize = 2097152000 // 1.91 GB
+	}
+	if GlobalConfig.LeechSplitSize == 0 || GlobalConfig.LeechSplitSize > MaxSplitSize || GlobalConfig.LeechSplitSize == 2097152000 || GlobalConfig.LeechSplitSize == 4194304000 {
+		GlobalConfig.LeechSplitSize = MaxSplitSize
+	}
+}
+
+func GetMaxSplitSize() int64 {
+	configLock.RLock()
+	defer configLock.RUnlock()
+	return MaxSplitSize
+}
 
 func LoadConfig(path string) (*Config, error) {
 	configLock.Lock()
@@ -244,7 +266,11 @@ func UpdateConfigVar(key, val string) error {
 	case "AUTO_DELETE_MESSAGE_DURATION":
 		GlobalConfig.AutoDeleteMessageDuration, _ = strconv.Atoi(val)
 	case "LEECH_SPLIT_SIZE":
-		GlobalConfig.LeechSplitSize, _ = strconv.ParseInt(val, 10, 64)
+		valInt, _ := strconv.ParseInt(val, 10, 64)
+		if valInt > MaxSplitSize || valInt <= 0 {
+			valInt = MaxSplitSize
+		}
+		GlobalConfig.LeechSplitSize = valInt
 	case "AS_DOCUMENT":
 		GlobalConfig.AsDocument = val == "true" || val == "1"
 	case "EQUAL_SPLITS":

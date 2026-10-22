@@ -544,13 +544,14 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		}
 	}()
 
-	// 7. File Splitting (2GB standard, 4GB for Telegram Premium)
+	// 7. File Splitting (1.91GB standard, 3.91GB for Telegram Premium userbot)
+	maxSplit := config.GetMaxSplitSize()
 	splitSize := cfg.LeechSplitSize
 	if user != nil && user.SplitSize > 0 {
 		splitSize = user.SplitSize
 	}
-	if isPremium && splitSize < 4194304000 {
-		splitSize = 4194304000
+	if splitSize > maxSplit || splitSize <= 0 {
+		splitSize = maxSplit
 	}
 
 	splitDir := filepath.Join(taskDir, "splits")

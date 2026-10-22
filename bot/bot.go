@@ -406,14 +406,34 @@ func (b *BotApp) Start(ctx context.Context) error {
 					return err
 				}
 				if status.Authorized {
-					log.Println("[AZML-Go User Client] Logged in successfully with User Session (4GB upload enabled)")
+					userSelf, _ := b.userClient.Self(uCtx)
+					if userSelf != nil {
+						uname := userSelf.Username
+						if uname == "" {
+							uname = userSelf.FirstName
+						}
+						isPrem := userSelf.Premium
+						config.SetIsPremiumUser(isPrem)
+						if isPrem {
+							log.Printf("[AZML-Go User Client] Logged in successfully with User Session as @%s (ID: %d, PREMIUM ACTIVE: Max Split 3.91GB / 4GB upload enabled)", uname, userSelf.ID)
+						} else {
+							log.Printf("[AZML-Go User Client] Logged in successfully with User Session as @%s (ID: %d, NON-PREMIUM: Max Split 1.91GB)", uname, userSelf.ID)
+						}
+					} else {
+						config.SetIsPremiumUser(false)
+						log.Println("[AZML-Go User Client] Logged in successfully with User Session (NON-PREMIUM: Max Split 1.91GB)")
+					}
 				} else {
-					log.Println("[AZML-Go User Client] Session authorized status false")
+					config.SetIsPremiumUser(false)
+					log.Println("[AZML-Go User Client] Session authorized status false (Max Split 1.91GB)")
 				}
 				<-uCtx.Done()
 				return uCtx.Err()
 			})
 		}()
+	} else {
+		config.SetIsPremiumUser(false)
+		log.Println("[AZML-Go User Client] No user session string configured (Max Split 1.91GB / 2GB upload mode active)")
 	}
 
 	log.Println("[AZML-Go Bot Client] Starting bot client...")
@@ -428,7 +448,15 @@ func (b *BotApp) Start(ctx context.Context) error {
 			if _, err := b.client.Auth().Bot(ctx, cfg.BotToken); err != nil {
 				return fmt.Errorf("bot authentication failed: %v", err)
 			}
-			log.Println("[AZML-Go Bot Client] Logged in successfully with Bot Token")
+		}
+
+		botSelf, _ := b.client.Self(ctx)
+		if botSelf != nil {
+			uname := botSelf.Username
+			if uname == "" {
+				uname = botSelf.FirstName
+			}
+			log.Printf("[AZML-Go Bot Client] Logged in successfully with Bot Token as @%s (ID: %d)", uname, botSelf.ID)
 		} else {
 			log.Println("[AZML-Go Bot Client] Logged in successfully with Bot Token")
 		}
