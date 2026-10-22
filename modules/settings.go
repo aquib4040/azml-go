@@ -6,9 +6,10 @@ import (
 	"strconv"
 	"strings"
 
-	"azml-go/types"
+	"azml-go/config"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
+	"azml-go/types"
 
 	"github.com/gotd/td/tg"
 )
@@ -132,6 +133,7 @@ func (m *SettingsModule) buildSettingsMenu(u *types.UserSettings) (string, *tele
 	}
 	btn.IButton("Set Split Size", fmt.Sprintf("uset %d split", u.UserID))
 	btn.IButton("Set Dump ID", fmt.Sprintf("uset %d dump", u.UserID))
+	btn.IButton("Back", fmt.Sprintf("uset %d back", u.UserID))
 	btn.IButton("Close", fmt.Sprintf("uset %d close", u.UserID))
 
 	return text, btn
@@ -153,9 +155,24 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 	u := m.userMap.GetOrCreate(targetUID)
 
 	switch action {
+	case "open":
+		text, btn := m.buildSettingsMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 	case "close":
 		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 		_ = m.sender.AnswerCallback(ctx, queryID, "Settings closed", false)
+	case "back":
+		cfg := config.Get()
+		sfx := cfg.CmdSuffix
+		reply := fmt.Sprintf("👋 <b>Hello!</b>\n\n"+
+			"<i>This bot can leech all your links|files|torrents to Telegram or to ddl servers.</i>\n\n"+
+			"Type <code>/help%s</code> to get a list of available commands.", sfx)
+		btn := telegram.NewButtonMaker()
+		btn.UButton("Repo", "https://github.com/aquib4040/AZML")
+		btn.IButton("Settings", fmt.Sprintf("uset %d open", targetUID))
+		_ = m.sender.EditMessage(ctx, peer, msgID, reply, btn.BuildMenu(2))
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 	case "toggle_method":
 		if u.RenameMethod == "auto" {
 			u.RenameMethod = "regex"
@@ -177,7 +194,7 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 		}
 		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Auto Thumbnail is now %s", status), false)
 	default:
-		helpText := fmt.Sprintf("To set <b>%s</b>, reply to this message with your value!\n<b>Example:</b> <code>/usetting %s [value]</code>", action, action)
+		helpText := fmt.Sprintf("To set %s, reply with your value!\nExample: /usetting %s [value]", action, action)
 		_ = m.sender.AnswerCallback(ctx, queryID, helpText, true)
 	}
 }

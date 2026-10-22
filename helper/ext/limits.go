@@ -144,6 +144,13 @@ func CheckTaskLimits(userID int64, size int64, taskType string, isExtract, isCom
 					return fmt.Sprintf("YT-DLP limit is %s.\nYour task size is %s.", GetReadableFileSize(limitBytes), GetReadableFileSize(size))
 				}
 			}
+		case "mega":
+			if cfg.MegaLimit > 0 {
+				limitBytes = cfg.MegaLimit * 1024 * 1024 * 1024
+				if size > limitBytes {
+					return fmt.Sprintf("Mega limit is %s.\nYour task size is %s.", GetReadableFileSize(limitBytes), GetReadableFileSize(size))
+				}
+			}
 		}
 
 		// Global Leech Limit

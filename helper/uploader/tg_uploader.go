@@ -73,59 +73,35 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	const twoGB = int64(2097152000)
 	var clientToUse *tg.Client
-	var uploaderToUse *uploader.Uploader
 
 	if fileSize > twoGB {
 		if u.userClient == nil || u.userUp == nil {
 			return nil, fmt.Errorf("file size %s exceeds 2GB limit; USER_SESSION_STRING is required to upload files > 2GB (up to 4GB)", ext.GetReadableFileSize(fileSize))
 		}
-		log.Printf("[AZML-Go User Client] Uploading large file (%s > 2GB) using User Session with 16 parallel threads...", ext.GetReadableFileSize(fileSize))
+		log.Printf("[AZML-Go] Uploading %s (%s > 2GB) using User Client...", opt.FileName, ext.GetReadableFileSize(fileSize))
 		clientToUse = u.userClient
-		uploaderToUse = u.userUp
 	} else {
-		log.Printf("[AZML-Go Bot Client] Uploading file (%s <= 2GB) using Bot Client with 16 parallel threads...", ext.GetReadableFileSize(fileSize))
+		log.Printf("[AZML-Go] Uploading %s (%s <= 2GB) using Bot Client...", opt.FileName, ext.GetReadableFileSize(fileSize))
 		clientToUse = u.botClient
-		uploaderToUse = u.botUp
 	}
 
 	uploadStart := time.Now()
-	var lastReport time.Time
-
-	// Stream upload directly from disk with progress wrapper
-	fileHandle, err := os.Open(opt.FilePath)
-	if err != nil {
-		return nil, err
-	}
-	defer fileHandle.Close()
-
-	progressReader := &progressReaderWrapper{
-		reader: fileHandle,
-		total:  fileSize,
-		onProgress: func(curr int64) {
-			if opt.OnProgress != nil && time.Since(lastReport) >= 1*time.Second {
-				elapsed := time.Since(uploadStart).Seconds()
-				speed := float64(0)
-				if elapsed > 0 {
-					speed = float64(curr) / elapsed
-				}
-				eta := "-"
-				if speed > 0 {
-					remSec := int64(float64(fileSize-curr) / speed)
-					eta = fmt.Sprintf("%ds", remSec)
-				}
-				opt.OnProgress(curr, fileSize, speed, eta)
-				lastReport = time.Now()
-			}
-		},
-	}
-
 	uploadName := opt.FileName
 	if uploadName == "" {
 		uploadName = filepath.Base(opt.FilePath)
 	}
 
-	uploadPayload := uploader.NewUpload(uploadName, progressReader, fileSize)
-	uploadedFile, err := uploaderToUse.Upload(ctx, uploadPayload)
+	tracker := &uploadProgressTracker{
+		uploadStart: uploadStart,
+		onProgress:  opt.OnProgress,
+	}
+
+	up := uploader.NewUploader(clientToUse).
+		WithPartSize(512 * 1024).
+		WithThreads(8).
+		WithProgress(tracker)
+
+	uploadedFile, err := up.FromPath(ctx, opt.FilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload file parts: %v", err)
 	}
@@ -270,30 +246,33 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	return &res, nil
 }
 
-type progressReaderWrapper struct {
-	reader     *os.File
-	total      int64
-	curr       int64
-	onProgress func(int64)
-	mu         sync.Mutex
+type uploadProgressTracker struct {
+	uploadStart time.Time
+	lastReport  time.Time
+	onProgress  UploadProgressFunc
+	mu          sync.Mutex
 }
 
-func (p *progressReaderWrapper) Read(b []byte) (int, error) {
-	n, err := p.reader.Read(b)
-	if n > 0 {
-		p.mu.Lock()
-		p.curr += int64(n)
-		curr := p.curr
-		p.mu.Unlock()
-		if p.onProgress != nil {
-			p.onProgress(curr)
+func (t *uploadProgressTracker) Chunk(ctx context.Context, state uploader.ProgressState) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if time.Since(t.lastReport) >= 1500*time.Millisecond {
+		elapsed := time.Since(t.uploadStart).Seconds()
+		speed := float64(0)
+		if elapsed > 0 {
+			speed = float64(state.Uploaded) / elapsed
 		}
+		eta := "-"
+		if speed > 0 && state.Total > state.Uploaded {
+			remSec := int64(float64(state.Total-state.Uploaded) / speed)
+			eta = ext.GetReadableTime(remSec)
+		}
+		if t.onProgress != nil {
+			t.onProgress(state.Uploaded, state.Total, speed, eta)
+		}
+		t.lastReport = time.Now()
 	}
-	return n, err
-}
-
-func (p *progressReaderWrapper) Seek(offset int64, whence int) (int64, error) {
-	return p.reader.Seek(offset, whence)
+	return nil
 }
 
 func isVideoExt(ext string) bool {

@@ -99,40 +99,43 @@ func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass,
 		markup = btn.BuildMenu(3)
 	}
 
-	res, err := m.sender.SendMessage(ctx, peer, text, msg.MessageID, markup)
-	if err != nil || res == nil {
+	sentID, err := m.sender.SendMessage(ctx, peer, text, msg.MessageID, markup)
+	if err != nil || sentID <= 0 {
 		return
 	}
 
-	var sentID int
-	if updates, ok := (*res).(*tg.Updates); ok && len(updates.Updates) > 0 {
-		for _, u := range updates.Updates {
-			if uMsg, ok := u.(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					sentID = mObj.ID
-					break
-				}
-			} else if uChannel, ok := u.(*tg.UpdateNewChannelMessage); ok {
-				if mObj, ok := uChannel.Message.(*tg.Message); ok {
-					sentID = mObj.ID
-					break
-				}
-			}
-		}
+	m.mu.Lock()
+	m.statusReplies[msg.ChatID] = &StatusReplyInfo{
+		ChatID:      msg.ChatID,
+		MessageID:   sentID,
+		Peer:        peer,
+		CurrentPage: page,
+		LastEdit:    time.Now(),
 	}
+	m.chatPages[msg.ChatID] = page
+	m.mu.Unlock()
+}
 
-	if sentID > 0 {
-		m.mu.Lock()
-		m.statusReplies[msg.ChatID] = &StatusReplyInfo{
-			ChatID:      msg.ChatID,
-			MessageID:   sentID,
-			Peer:        peer,
-			CurrentPage: page,
-			LastEdit:    time.Now(),
-		}
-		m.chatPages[msg.ChatID] = page
-		m.mu.Unlock()
+func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPeerClass) {
+	if msgID <= 0 {
+		return
 	}
+	m.mu.Lock()
+	m.statusReplies[chatID] = &StatusReplyInfo{
+		ChatID:      chatID,
+		MessageID:   msgID,
+		Peer:        peer,
+		CurrentPage: 1,
+		LastEdit:    time.Time{},
+	}
+	m.mu.Unlock()
+	go m.UpdateAllMessages(context.Background(), true)
+}
+
+func (m *StatusModule) RemoveStatusMessage(chatID int64) {
+	m.mu.Lock()
+	delete(m.statusReplies, chatID)
+	m.mu.Unlock()
 }
 
 func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string) {

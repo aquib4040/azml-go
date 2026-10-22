@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,45 +78,85 @@ func (m *HelpModule) HandleHelp(ctx context.Context, peer tg.InputPeerClass, msg
 
 func (m *HelpModule) HandlePing(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
 	start := time.Now()
-	res, err := m.sender.SendMessage(ctx, peer, "<i>Pinging...</i>", msg.MessageID, nil)
-	if err == nil && res != nil {
+	resID, err := m.sender.SendMessage(ctx, peer, "<i>Pinging...</i>", msg.MessageID, nil)
+	if err == nil && resID > 0 {
 		diff := time.Since(start).Milliseconds()
-		// Get message ID
-		if updates, ok := (*res).(*tg.Updates); ok && len(updates.Updates) > 0 {
-			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					_ = m.sender.EditMessage(ctx, peer, mObj.ID, fmt.Sprintf("🏓 <b>Pong!</b> <code>%d ms</code>", diff), nil)
-				}
-			}
-		}
+		_ = m.sender.EditMessage(ctx, peer, resID, fmt.Sprintf("🏓 <b>Pong!</b> <code>%d ms</code>", diff), nil)
 	}
 }
 
+func (m *HelpModule) getStatsView(key string, targetUID int64) (string, tg.ReplyMarkupClass) {
+	btn := telegram.NewButtonMaker()
+	var msg string
+
+	if key == "home" {
+		btn.IButton("Bot Stats", fmt.Sprintf("stats %d stbot", targetUID))
+		btn.IButton("OS Stats", fmt.Sprintf("stats %d stsys", targetUID))
+		btn.IButton("Repo Stats", fmt.Sprintf("stats %d strepo", targetUID))
+		btn.IButton("Bot Limits", fmt.Sprintf("stats %d botlimits", targetUID))
+		btn.IButton("Close", fmt.Sprintf("stats %d close", targetUID))
+		msg = "⌬ <b><i>Bot & OS Statistics!</i></b>"
+	} else {
+		btn.IButton("Back", fmt.Sprintf("stats %d home", targetUID))
+		btn.IButton("Close", fmt.Sprintf("stats %d close", targetUID))
+
+		switch key {
+		case "stbot":
+			msg = ext.RenderBotStats(m.startTime)
+		case "stsys":
+			msg = ext.RenderSysStats()
+		case "strepo":
+			msg = ext.RenderRepoStats()
+		case "botlimits":
+			msg = ext.RenderBotLimits()
+		default:
+			msg = "⌬ <b><i>Bot & OS Statistics!</i></b>"
+		}
+	}
+
+	return msg, btn.BuildMenu(2)
+}
+
 func (m *HelpModule) HandleStats(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
-	uptime := ext.TimeSinceFormatted(m.startTime)
-	memStats := ext.GetMemoryStats()
-	goroutines := runtime.NumGoroutine()
+	text, markup := m.getStatsView("home", msg.UserID)
+	_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, markup)
+}
 
-	statsText := fmt.Sprintf("📊 <b>AZML-Go System & RAM Statistics:</b>\n\n"+
-		"⏱ <b>Bot Uptime:</b> <code>%s</code>\n"+
-		"🧵 <b>Goroutines:</b> <code>%d</code>\n"+
-		"🖥 <b>OS / Arch:</b> <code>%s / %s</code>\n\n"+
-		"━━━━━━━━━━━━━━━━━━━━━\n"+
-		"🧠 <b>RAM (MEMORY) BREAKDOWN:</b>\n"+
-		"━━━━━━━━━━━━━━━━━━━━━\n"+
-		"┃ %s\n"+
-		"┠ <b>AZML-Go Process:</b> <code>%s</code> (Alloc: <code>%s</code>)\n"+
-		"┖ <b>OS Level RAM:</b>     <b>Used:</b> <code>%s</code> | <b>Free:</b> <code>%s</code> | <b>Total:</b> <code>%s</code>\n\n"+
-		"⚡ <b>Engine:</b> <code>Go %s</code>",
-		uptime,
-		goroutines,
-		runtime.GOOS, runtime.GOARCH,
-		memStats.ProgressBar,
-		memStats.ProcessSys, memStats.ProcessAlloc,
-		memStats.OSUsed, memStats.OSFree, memStats.OSTotal,
-		runtime.Version())
+func (m *HelpModule) HandleStatsCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64) {
+	parts := strings.Fields(data)
+	if len(parts) < 3 {
+		return
+	}
 
-	_, _ = m.sender.SendMessage(ctx, peer, statsText, msg.MessageID, nil)
+	var targetUID int64
+	var key string
+
+	if parts[0] == "wzmlx" {
+		targetUID, _ = strconv.ParseInt(parts[1], 10, 64)
+		if parts[2] == "close" {
+			key = "close"
+		} else if len(parts) >= 4 && parts[2] == "stats" {
+			key = parts[3]
+		}
+	} else if parts[0] == "stats" {
+		targetUID, _ = strconv.ParseInt(parts[1], 10, 64)
+		key = parts[2]
+	}
+
+	if targetUID != 0 && targetUID != fromUID && !telegram.IsOwner(fromUID) {
+		_ = m.sender.AnswerCallback(ctx, queryID, "This menu is not for you!", true)
+		return
+	}
+
+	if key == "close" {
+		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
+		_ = m.sender.AnswerCallback(ctx, queryID, "Closed!", false)
+		return
+	}
+
+	text, markup := m.getStatsView(key, targetUID)
+	_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+	_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 }
 
 func (m *HelpModule) HandleLog(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {

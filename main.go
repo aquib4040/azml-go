@@ -67,9 +67,9 @@ func main() {
 	startTime := app.GetStartTime()
 	ext.SetBotStartTime(startTime)
 
-	leechMod := modules.NewLeechModule(app.GetRawAPI(), sender, uploader, userMap)
-	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap)
 	statusMod := modules.NewStatusModule(sender)
+	leechMod := modules.NewLeechModule(app.GetRawAPI(), sender, uploader, userMap, statusMod)
+	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap)
 	cancelMod := modules.NewCancelModule(sender, userMap)
 	settingsMod := modules.NewSettingsModule(sender, userMap)
 	botSetMod := modules.NewBotSettingsModule(sender, userMap)
@@ -103,6 +103,7 @@ func main() {
 		helpMod.HandleStats,
 		helpMod.HandleLog,
 		helpMod.HandleRestart,
+		helpMod.HandleStatsCallback,
 	)
 	app.SetExtraHandlers(
 		speedMod.HandleSpeedtest,

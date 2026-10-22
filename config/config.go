@@ -72,6 +72,7 @@ type Config struct {
 	TorrentLimit              int64 // GB
 	DirectLimit               int64 // GB
 	YtdlpLimit                int64 // GB
+	MegaLimit                 int64 // GB
 	ArchiveLimit              int64 // GB
 	ExtractLimit              int64 // GB
 	DailyLeechLimit           int64 // GB
@@ -170,13 +171,14 @@ func LoadConfig(path string) (*Config, error) {
 		AutoThumbnail:             getEnvBool("AUTO_THUMBNAIL", false),
 		CoverImage:                getEnv("COVER_IMAGE", "https://graph.org/file/60f9f8bcb97d27f76f5c0.jpg"),
 		DDLAPI:                    getEnv("DDL_API", getEnv("THUNDER_API", "")),
-		QueueAll:                  getEnvInt("QUEUE_ALL", 0),
-		QueueDownload:             getEnvInt("QUEUE_DOWNLOAD", 0),
+		QueueAll:                  getEnvInt("QUEUE_ALL", getEnvInt("BOT_MAX_TASKS", 0)),
+		QueueDownload:             getEnvInt("QUEUE_DOWNLOAD", getEnvInt("USER_MAX_TASKS", 0)),
 		QueueUpload:               getEnvInt("QUEUE_UPLOAD", 0),
 		LeechLimit:                getEnvInt64("LEECH_LIMIT", 0),
 		TorrentLimit:              getEnvInt64("TORRENT_LIMIT", 0),
 		DirectLimit:               getEnvInt64("DIRECT_LIMIT", 0),
 		YtdlpLimit:                getEnvInt64("YTDLP_LIMIT", 0),
+		MegaLimit:                 getEnvInt64("MEGA_LIMIT", 0),
 		ArchiveLimit:              getEnvInt64("ARCHIVE_LIMIT", 0),
 		ExtractLimit:              getEnvInt64("EXTRACT_LIMIT", 0),
 		DailyLeechLimit:           getEnvInt64("DAILY_LEECH_LIMIT", 0),
@@ -317,12 +319,32 @@ func UpdateConfigVar(key, val string) error {
 		GlobalConfig.BaseURL = val
 	case "BASE_URL_PORT":
 		GlobalConfig.BaseURLPort, _ = strconv.Atoi(val)
-	case "QUEUE_ALL":
+	case "QUEUE_ALL", "BOT_MAX_TASKS":
 		GlobalConfig.QueueAll, _ = strconv.Atoi(val)
-	case "QUEUE_DOWNLOAD":
+	case "QUEUE_DOWNLOAD", "USER_MAX_TASKS":
 		GlobalConfig.QueueDownload, _ = strconv.Atoi(val)
 	case "QUEUE_UPLOAD":
 		GlobalConfig.QueueUpload, _ = strconv.Atoi(val)
+	case "LEECH_LIMIT":
+		GlobalConfig.LeechLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "TORRENT_LIMIT":
+		GlobalConfig.TorrentLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "DIRECT_LIMIT":
+		GlobalConfig.DirectLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "YTDLP_LIMIT":
+		GlobalConfig.YtdlpLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "MEGA_LIMIT":
+		GlobalConfig.MegaLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "ARCHIVE_LIMIT":
+		GlobalConfig.ArchiveLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "EXTRACT_LIMIT":
+		GlobalConfig.ExtractLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "DAILY_LEECH_LIMIT":
+		GlobalConfig.DailyLeechLimit, _ = strconv.ParseInt(val, 10, 64)
+	case "DAILY_TASK_LIMIT":
+		GlobalConfig.DailyTaskLimit, _ = strconv.Atoi(val)
+	case "STORAGE_THRESHOLD":
+		GlobalConfig.StorageThreshold, _ = strconv.ParseInt(val, 10, 64)
 	}
 	return nil
 }
@@ -362,6 +384,18 @@ func GetConfigMap() map[string]string {
 		"QUEUE_ALL":                    strconv.Itoa(GlobalConfig.QueueAll),
 		"QUEUE_DOWNLOAD":               strconv.Itoa(GlobalConfig.QueueDownload),
 		"QUEUE_UPLOAD":                 strconv.Itoa(GlobalConfig.QueueUpload),
+		"USER_MAX_TASKS":               strconv.Itoa(GlobalConfig.QueueDownload),
+		"BOT_MAX_TASKS":                strconv.Itoa(GlobalConfig.QueueAll),
+		"LEECH_LIMIT":                  strconv.FormatInt(GlobalConfig.LeechLimit, 10),
+		"TORRENT_LIMIT":                strconv.FormatInt(GlobalConfig.TorrentLimit, 10),
+		"DIRECT_LIMIT":                 strconv.FormatInt(GlobalConfig.DirectLimit, 10),
+		"YTDLP_LIMIT":                  strconv.FormatInt(GlobalConfig.YtdlpLimit, 10),
+		"MEGA_LIMIT":                   strconv.FormatInt(GlobalConfig.MegaLimit, 10),
+		"ARCHIVE_LIMIT":                strconv.FormatInt(GlobalConfig.ArchiveLimit, 10),
+		"EXTRACT_LIMIT":                strconv.FormatInt(GlobalConfig.ExtractLimit, 10),
+		"DAILY_LEECH_LIMIT":            strconv.FormatInt(GlobalConfig.DailyLeechLimit, 10),
+		"DAILY_TASK_LIMIT":             strconv.Itoa(GlobalConfig.DailyTaskLimit),
+		"STORAGE_THRESHOLD":            strconv.FormatInt(GlobalConfig.StorageThreshold, 10),
 	}
 }
 

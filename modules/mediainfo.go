@@ -46,17 +46,7 @@ func (m *MediaInfoModule) HandleMediaInfo(ctx context.Context, peer tg.InputPeer
 		return
 	}
 
-	waitMsg, _ := m.sender.SendMessage(ctx, peer, "<i>Generating MediaInfo...</i>", msg.MessageID, nil)
-	var waitID int
-	if waitMsg != nil {
-		if updates, ok := (*waitMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
-			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					waitID = mObj.ID
-				}
-			}
-		}
-	}
+	waitID, _ := m.sender.SendMessage(ctx, peer, "<i>Generating MediaInfo...</i>", msg.MessageID, nil)
 
 	go func() {
 		tmpDir, err := os.MkdirTemp("", "mediainfo_*")

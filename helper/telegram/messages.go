@@ -33,7 +33,57 @@ func ParseFormatting(text string) (string, []tg.MessageEntityClass) {
 	return b.Complete()
 }
 
-func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, markup tg.ReplyMarkupClass) (*tg.UpdatesClass, error) {
+// ExtractMessageID extracts the message ID from any tg.UpdatesClass returned by SendMessage
+func ExtractMessageID(updates tg.UpdatesClass) int {
+	if updates == nil {
+		return 0
+	}
+	switch u := updates.(type) {
+	case *tg.UpdateShortSentMessage:
+		return u.ID
+	case *tg.UpdateShortMessage:
+		return u.ID
+	case *tg.UpdateShortChatMessage:
+		return u.ID
+	case *tg.Updates:
+		for _, upd := range u.Updates {
+			switch m := upd.(type) {
+			case *tg.UpdateNewMessage:
+				if msg, ok := m.Message.(*tg.Message); ok {
+					return msg.ID
+				}
+				if msg, ok := m.Message.(*tg.MessageService); ok {
+					return msg.ID
+				}
+			case *tg.UpdateNewChannelMessage:
+				if msg, ok := m.Message.(*tg.Message); ok {
+					return msg.ID
+				}
+				if msg, ok := m.Message.(*tg.MessageService); ok {
+					return msg.ID
+				}
+			case *tg.UpdateMessageID:
+				return m.ID
+			}
+		}
+	case *tg.UpdatesCombined:
+		for _, upd := range u.Updates {
+			switch m := upd.(type) {
+			case *tg.UpdateNewMessage:
+				if msg, ok := m.Message.(*tg.Message); ok {
+					return msg.ID
+				}
+			case *tg.UpdateNewChannelMessage:
+				if msg, ok := m.Message.(*tg.Message); ok {
+					return msg.ID
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, markup tg.ReplyMarkupClass) (int, error) {
 	plainText, entities := ParseFormatting(text)
 	req := &tg.MessagesSendMessageRequest{
 		Peer:     peer,
@@ -53,16 +103,20 @@ func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass,
 	updates, err := m.rawClient.MessagesSendMessage(ctx, req)
 	if err != nil {
 		log.Printf("[AZML-Go Bot Client] Error sending message to peer %T: %v", peer, err)
-		return nil, err
+		return 0, err
 	}
-	return &updates, nil
+	msgID := ExtractMessageID(updates)
+	return msgID, nil
 }
 
 func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass, msgID int, text string, markup tg.ReplyMarkupClass) error {
+	if msgID <= 0 {
+		return nil
+	}
 	plainText, entities := ParseFormatting(text)
 	req := &tg.MessagesEditMessageRequest{
 		Peer:     peer,
-		ID:      msgID,
+		ID:       msgID,
 		Message:  plainText,
 		Entities: entities,
 	}

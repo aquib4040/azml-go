@@ -72,17 +72,7 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 	taskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(4)))
 	_ = os.MkdirAll(taskDir, 0755)
 
-	notifyMsg, _ := m.sender.SendMessage(ctx, peer, "<i>Fetching media info with yt-dlp...</i>", msg.MessageID, nil)
-	var notifyID int
-	if notifyMsg != nil {
-		if updates, ok := (*notifyMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
-			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					notifyID = mObj.ID
-				}
-			}
-		}
-	}
+	notifyID, _ := m.sender.SendMessage(ctx, peer, "<i>Fetching media info with yt-dlp...</i>", msg.MessageID, nil)
 
 	go m.processYtdl(peer, msg, link, customQuality, taskDir, notifyID)
 }

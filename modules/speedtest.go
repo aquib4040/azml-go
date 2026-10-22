@@ -43,17 +43,7 @@ type cliSpeedResult struct {
 }
 
 func (m *SpeedtestModule) HandleSpeedtest(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
-	waitMsg, _ := m.sender.SendMessage(ctx, peer, "<i>Initiating Speedtest...</i>", msg.MessageID, nil)
-	var waitID int
-	if waitMsg != nil {
-		if updates, ok := (*waitMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
-			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					waitID = mObj.ID
-				}
-			}
-		}
-	}
+	waitID, _ := m.sender.SendMessage(ctx, peer, "<i>Initiating Speedtest...</i>", msg.MessageID, nil)
 
 	go func() {
 		// 1. Try speedtest-cli command if installed

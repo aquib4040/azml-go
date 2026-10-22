@@ -24,8 +24,9 @@ import (
 )
 
 var (
-	accessHashMu     sync.RWMutex
-	userAccessHashes = make(map[int64]int64)
+	accessHashMu        sync.RWMutex
+	userAccessHashes    = make(map[int64]int64)
+	channelAccessHashes = make(map[int64]int64)
 )
 
 type BotApp struct {
@@ -39,6 +40,7 @@ type BotApp struct {
 	uploader   *uploader.TelegramUploader
 	userMap    *types.SafeUserMap
 	startTime  time.Time
+	botUsername string
 
 	// Modules
 	leechHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool)
@@ -71,6 +73,7 @@ type BotApp struct {
 	imdbHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	animeHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 
+	statsCbHandler      func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	megaSelectCbHandler func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	gdSelectCbHandler   func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 }
@@ -84,7 +87,6 @@ type botUpdateHandler struct {
 func (h *botUpdateHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 	switch upd := u.(type) {
 	case *tg.UpdateShortMessage:
-		log.Printf("[AZML-Go Bot Client] Received UpdateShortMessage from user %d: %q", upd.UserID, upd.Message)
 		msg := &tg.Message{
 			Out:       upd.Out,
 			Mentioned: upd.Mentioned,
@@ -106,7 +108,6 @@ func (h *botUpdateHandler) Handle(ctx context.Context, u tg.UpdatesClass) error 
 		return nil
 
 	case *tg.UpdateShortChatMessage:
-		log.Printf("[AZML-Go Bot Client] Received UpdateShortChatMessage from user %d in chat %d: %q", upd.FromID, upd.ChatID, upd.Message)
 		msg := &tg.Message{
 			Out:       upd.Out,
 			Mentioned: upd.Mentioned,
@@ -214,13 +215,17 @@ func (b *BotApp) SetAuthorizeHandlers(auth, unauth, addSudo, rmSudo, addPrem, rm
 	b.rmPremHandler = rmPrem
 	b.checkPremHandler = checkPrem
 }
-func (b *BotApp) SetHelpHandlers(start, help, ping, stats, logH, restart func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
+func (b *BotApp) SetHelpHandlers(
+	start, help, ping, stats, logH, restart func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext),
+	statsCb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64),
+) {
 	b.startHandler = start
 	b.helpHandler = help
 	b.pingHandler = ping
 	b.statsHandler = stats
 	b.logHandler = logH
 	b.restartHandler = restart
+	b.statsCbHandler = statsCb
 }
 func (b *BotApp) SetExtraHandlers(speed, mi, bc, imdb, anime func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
 	b.speedtestHandler = speed
@@ -250,6 +255,11 @@ func (b *BotApp) registerDispatcher() {
 	})
 
 	b.dispatcher.OnNewChannelMessage(func(ctx context.Context, e tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		for chID, ch := range e.Channels {
+			if ch.AccessHash != 0 {
+				b.cacheChannelAccessHash(chID, ch.AccessHash)
+			}
+		}
 		msg, ok := update.Message.(*tg.Message)
 		if !ok || msg.Out {
 			return nil
@@ -292,11 +302,23 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	}
 
 	text := strings.TrimSpace(m.Message)
-	if text == "" && m.Media == nil {
+
+	// 1. Handle incoming private media attachments (token.pickle, config.env, cookies.txt, accounts.zip)
+	if m.Media != nil {
+		if b.handleIncomingMedia(ctx, peer, m, senderID, chatID) {
+			return
+		}
+		if text == "" {
+			return
+		}
+	}
+
+	// 2. ONLY respond to bot commands! Ignore all normal chatting and other bots' messages completely.
+	if !telegram.BotCommands.IsAnyCommand(text, b.botUsername) {
 		return
 	}
 
-	log.Printf("[AZML-Go Bot Client] Routing message from user %d (%s) in chat %d: %q", senderID, senderName, chatID, text)
+	log.Printf("[AZML-Go] Command %q from user %d in chat %d", text, senderID, chatID)
 
 	msgCtx := &types.MessageContext{
 		ChatID:     chatID,
@@ -313,47 +335,42 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		}
 	}
 
-	// 1. PUBLIC COMMANDS: /start, /ping, /help (Always answered regardless of authorization)
-	if telegram.MatchCommand(text, telegram.BotCommands.Start) {
-		log.Printf("[AZML-Go Bot Client] Executing /start for user %d", senderID)
+	// 3. PUBLIC COMMANDS: /start, /ping, /help (Always answered regardless of authorization)
+	if telegram.MatchCommand(text, telegram.BotCommands.Start, b.botUsername) {
 		if b.startHandler != nil {
 			b.startHandler(ctx, peer, msgCtx)
 		}
 		return
 	}
-	if telegram.MatchCommand(text, telegram.BotCommands.Ping) {
-		log.Printf("[AZML-Go Bot Client] Executing /ping for user %d", senderID)
+	if telegram.MatchCommand(text, telegram.BotCommands.Ping, b.botUsername) {
 		if b.pingHandler != nil {
 			b.pingHandler(ctx, peer, msgCtx)
 		}
 		return
 	}
-	if telegram.MatchCommand(text, telegram.BotCommands.Help) {
-		log.Printf("[AZML-Go Bot Client] Executing /help for user %d", senderID)
+	if telegram.MatchCommand(text, telegram.BotCommands.Help, b.botUsername) {
 		if b.helpHandler != nil {
 			b.helpHandler(ctx, peer, msgCtx)
 		}
 		return
 	}
 
-	// 2. Blacklist check
+	// 4. Blacklist check
 	if telegram.IsBlacklisted(senderID, b.userMap) {
-		log.Printf("[AZML-Go Bot Client] User %d is blacklisted, ignoring message", senderID)
 		return
 	}
 
-	// 3. Authorization check for leech, admin, settings, and task commands
+	// 5. Authorization check for leech, admin, settings, and task commands
 	if !telegram.IsAuthorized(chatID, senderID, b.userMap) {
-		log.Printf("[AZML-Go Bot Client] Unauthorized access by user %d in chat %d (Owner ID: %d)", senderID, chatID, config.Get().OwnerID)
-		_, _ = b.sender.SendMessage(ctx, peer, "⚠️ <b>Access Denied!</b>\nYou are not authorized to use this bot.\nContact the bot owner to get authorization.", m.ID, nil)
-		return
-	}
-
-	// 4. Handle media attachments (Private Files: token.pickle, config.env, cookies.txt, accounts.zip; or Custom Thumbnails)
-	if m.Media != nil {
-		if b.handleIncomingMedia(ctx, peer, m, senderID, chatID) {
-			return
+		log.Printf("[AZML-Go] Unauthorized command %q by user %d in chat %d", text, senderID, chatID)
+		sentID, _ := b.sender.SendMessage(ctx, peer, "⚠️ <b>Access Denied!</b>\nYou are not authorized to use this bot.\nContact the bot owner to get authorization.", m.ID, nil)
+		if sentID > 0 {
+			switch m.PeerID.(type) {
+			case *tg.PeerChat, *tg.PeerChannel:
+				b.sender.AutoDeleteMessage(peer, sentID, 15)
+			}
 		}
+		return
 	}
 
 	isCancel, _ := telegram.MatchCancelCommand(text)
@@ -469,6 +486,10 @@ func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuer
 	}
 
 	switch {
+	case strings.HasPrefix(data, "stats") || strings.HasPrefix(data, "wzmlx"):
+		if b.statsCbHandler != nil {
+			b.statsCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data, cb.UserID)
+		}
 	case strings.HasPrefix(data, "status"):
 		if b.statusCbHandler != nil {
 			b.statusCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data)
@@ -556,6 +577,7 @@ func (b *BotApp) Start(ctx context.Context) error {
 
 		botSelf, _ := b.client.Self(ctx)
 		if botSelf != nil {
+			b.botUsername = botSelf.Username
 			uname := botSelf.Username
 			if uname == "" {
 				uname = botSelf.FirstName
@@ -694,6 +716,15 @@ func (b *BotApp) cacheAccessHash(userID, hash int64) {
 	accessHashMu.Unlock()
 }
 
+func (b *BotApp) cacheChannelAccessHash(channelID, hash int64) {
+	if hash == 0 {
+		return
+	}
+	accessHashMu.Lock()
+	channelAccessHashes[channelID] = hash
+	accessHashMu.Unlock()
+}
+
 func (b *BotApp) getPeerWithEntities(p tg.PeerClass, entities tg.Entities) tg.InputPeerClass {
 	switch v := p.(type) {
 	case *tg.PeerUser:
@@ -709,9 +740,13 @@ func (b *BotApp) getPeerWithEntities(p tg.PeerClass, entities tg.Entities) tg.In
 		return &tg.InputPeerChat{ChatID: v.ChatID}
 	case *tg.PeerChannel:
 		if ch, ok := entities.Channels[v.ChannelID]; ok && ch.AccessHash != 0 {
+			b.cacheChannelAccessHash(ch.ID, ch.AccessHash)
 			return ch.AsInputPeer()
 		}
-		return &tg.InputPeerChannel{ChannelID: v.ChannelID}
+		accessHashMu.RLock()
+		hash := channelAccessHashes[v.ChannelID]
+		accessHashMu.RUnlock()
+		return &tg.InputPeerChannel{ChannelID: v.ChannelID, AccessHash: hash}
 	}
 	return nil
 }
@@ -726,7 +761,10 @@ func getPeer(p tg.PeerClass) tg.InputPeerClass {
 	case *tg.PeerChat:
 		return &tg.InputPeerChat{ChatID: v.ChatID}
 	case *tg.PeerChannel:
-		return &tg.InputPeerChannel{ChannelID: v.ChannelID}
+		accessHashMu.RLock()
+		hash := channelAccessHashes[v.ChannelID]
+		accessHashMu.RUnlock()
+		return &tg.InputPeerChannel{ChannelID: v.ChannelID, AccessHash: hash}
 	}
 	return nil
 }

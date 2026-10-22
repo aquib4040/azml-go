@@ -22,20 +22,22 @@ import (
 )
 
 type LeechModule struct {
-	rawAPI   *tg.Client
-	sender   *telegram.MessageSender
-	uploader *uploader.TelegramUploader
-	userMap  *types.SafeUserMap
-	taskMgr  *ext.TaskManager
+	rawAPI    *tg.Client
+	sender    *telegram.MessageSender
+	uploader  *uploader.TelegramUploader
+	userMap   *types.SafeUserMap
+	taskMgr   *ext.TaskManager
+	statusMod *StatusModule
 }
 
-func NewLeechModule(rawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap) *LeechModule {
+func NewLeechModule(rawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule) *LeechModule {
 	return &LeechModule{
-		rawAPI:   rawAPI,
-		sender:   sender,
-		uploader: uploader,
-		userMap:  userMap,
-		taskMgr:  ext.GetTaskManager(),
+		rawAPI:    rawAPI,
+		sender:    sender,
+		uploader:  uploader,
+		userMap:   userMap,
+		taskMgr:   ext.GetTaskManager(),
+		statusMod: statusMod,
 	}
 }
 
@@ -111,16 +113,9 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 				subTaskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("%d_%s", msg.UserID, ext.RandomHex(4)))
 				_ = os.MkdirAll(subTaskDir, 0755)
 
-				nMsg, _ := m.sender.SendMessage(context.Background(), peer, fmt.Sprintf("<i>Initiating Leech:</i> <code>%s</code>", truncateString(bLink, 40)), msg.MessageID, nil)
-				var nID int
-				if nMsg != nil {
-					if updates, ok := (*nMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
-						if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-							if mObj, ok := uMsg.Message.(*tg.Message); ok {
-								nID = mObj.ID
-							}
-						}
-					}
+				nID, _ := m.sender.SendMessage(context.Background(), peer, fmt.Sprintf("<i>Initiating Leech:</i> <code>%s</code>", truncateString(bLink, 40)), msg.MessageID, nil)
+				if nID > 0 && m.statusMod != nil {
+					m.statusMod.SetStatusMessage(msg.ChatID, nID, peer)
 				}
 				m.processLeechPipeline(peer, msg, opt, bLink, subTaskDir, nID)
 				time.Sleep(2 * time.Second)
@@ -202,16 +197,9 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 	taskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("%d_%s", msg.UserID, ext.RandomHex(4)))
 	_ = os.MkdirAll(taskDir, 0755)
 
-	notifyMsg, _ := m.sender.SendMessage(ctx, peer, "<i>Initiating Leech Task...</i>", msg.MessageID, nil)
-	var notifyID int
-	if notifyMsg != nil {
-		if updates, ok := (*notifyMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
-			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					notifyID = mObj.ID
-				}
-			}
-		}
+	notifyID, _ := m.sender.SendMessage(ctx, peer, "<i>Initiating Leech Task...</i>", msg.MessageID, nil)
+	if notifyID > 0 && m.statusMod != nil {
+		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
 	}
 
 	go m.processLeechPipeline(peer, msg, opt, link, taskDir, notifyID)
@@ -627,7 +615,12 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	// Record daily usage upon successful upload
 	ext.RecordDailyUsage(msg.UserID, uploadSize)
 
-	_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	if m.statusMod != nil {
+		m.statusMod.RemoveStatusMessage(msg.ChatID)
+	}
+	if notifyID > 0 {
+		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	}
 }
 
 func parseLeechArgs(text string) (types.LeechOptions, string) {

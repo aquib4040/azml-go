@@ -64,17 +64,7 @@ func (m *BroadcastModule) HandleBroadcast(ctx context.Context, peer tg.InputPeer
 	success := 0
 	failed := 0
 
-	statMsg, _ := m.sender.SendMessage(ctx, peer, "<i>Initiating broadcast...</i>", msg.MessageID, nil)
-	var statID int
-	if statMsg != nil {
-		if updates, ok := (*statMsg).(*tg.Updates); ok && len(updates.Updates) > 0 {
-			if uMsg, ok := updates.Updates[0].(*tg.UpdateNewMessage); ok {
-				if mObj, ok := uMsg.Message.(*tg.Message); ok {
-					statID = mObj.ID
-				}
-			}
-		}
-	}
+	statID, _ := m.sender.SendMessage(ctx, peer, "<i>Initiating broadcast...</i>", msg.MessageID, nil)
 
 	go func() {
 		for _, u := range users {
