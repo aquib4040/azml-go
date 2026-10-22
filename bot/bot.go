@@ -901,20 +901,26 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 
 			// 1B. Custom Thumbnail document
 			if strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") {
-				_ = os.MkdirAll("Thumbnails", 0755)
-				destThumb := fmt.Sprintf("Thumbnails/%d.jpg", senderID)
-				dl := tdDownloader.NewDownloader()
-				loc := doc.AsInputDocumentFileLocation("")
-				if loc != nil {
-					_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, destThumb)
-					if err == nil {
-						u := b.userMap.GetOrCreate(senderID)
-						u.CustomThumb = destThumb
-						_ = ext.DB.SaveUser(u)
-						_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
-						return true
+				caption := strings.ToLower(strings.TrimSpace(m.Message))
+				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
+				if ext.IsPendingThumbSession(senderID) || isThumbCmd {
+					ext.ClearPendingThumbSession(senderID)
+					_ = os.MkdirAll("Thumbnails", 0755)
+					destThumb := fmt.Sprintf("Thumbnails/%d.jpg", senderID)
+					dl := tdDownloader.NewDownloader()
+					loc := doc.AsInputDocumentFileLocation("")
+					if loc != nil {
+						_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, destThumb)
+						if err == nil {
+							u := b.userMap.GetOrCreate(senderID)
+							u.CustomThumb = destThumb
+							_ = ext.DB.SaveUser(u)
+							_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+							return true
+						}
 					}
 				}
+				return false
 			}
 
 			// 1C. Torrent file document
@@ -942,33 +948,39 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 		}
 	}
 
-	// Case 2: Photo media (Custom thumbnail for user)
+	// Case 2: Photo media (Custom thumbnail for user only if requested)
 	if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
-		if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
-			_ = os.MkdirAll("Thumbnails", 0755)
-			destThumb := fmt.Sprintf("Thumbnails/%d.jpg", senderID)
-			thumbSize := "m"
-			if len(photo.Sizes) > 0 {
-				switch s := photo.Sizes[len(photo.Sizes)-1].(type) {
-				case *tg.PhotoSize:
-					thumbSize = s.Type
-				case *tg.PhotoSizeProgressive:
-					thumbSize = s.Type
+		caption := strings.ToLower(strings.TrimSpace(m.Message))
+		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
+		if ext.IsPendingThumbSession(senderID) || isThumbCmd {
+			ext.ClearPendingThumbSession(senderID)
+			if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
+				_ = os.MkdirAll("Thumbnails", 0755)
+				destThumb := fmt.Sprintf("Thumbnails/%d.jpg", senderID)
+				thumbSize := "m"
+				if len(photo.Sizes) > 0 {
+					switch s := photo.Sizes[len(photo.Sizes)-1].(type) {
+					case *tg.PhotoSize:
+						thumbSize = s.Type
+					case *tg.PhotoSizeProgressive:
+						thumbSize = s.Type
+					}
 				}
-			}
-			dl := tdDownloader.NewDownloader()
-			loc := photo.AsInputPhotoFileLocation(thumbSize)
-			if loc != nil {
-				_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, destThumb)
-				if err == nil {
-					u := b.userMap.GetOrCreate(senderID)
-					u.CustomThumb = destThumb
-					_ = ext.DB.SaveUser(u)
-					_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
-					return true
+				dl := tdDownloader.NewDownloader()
+				loc := photo.AsInputPhotoFileLocation(thumbSize)
+				if loc != nil {
+					_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, destThumb)
+					if err == nil {
+						u := b.userMap.GetOrCreate(senderID)
+						u.CustomThumb = destThumb
+						_ = ext.DB.SaveUser(u)
+						_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+						return true
+					}
 				}
 			}
 		}
+		return false
 	}
 
 	return false

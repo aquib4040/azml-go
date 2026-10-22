@@ -144,6 +144,8 @@ func InitCommands() {
 			"us" + suffix,
 			"usersetting" + suffix,
 			"usersettings" + suffix,
+			"setthumb" + suffix,
+			"setthumb",
 		},
 		BotSetting: []string{
 			"bsetting" + suffix,

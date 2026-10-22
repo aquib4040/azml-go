@@ -32,6 +32,12 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 		return
 	}
 
+	if ext.IsPendingThumbSession(msg.UserID) {
+		ext.ClearPendingThumbSession(msg.UserID)
+		_, _ = m.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail upload cancelled.</b>", msg.MessageID, nil)
+		return
+	}
+
 	gid := extractedGID
 	if gid == "" && msg.IsReply {
 		for _, t := range m.taskMgr.GetAllTasks() {

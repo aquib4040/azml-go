@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -249,6 +251,43 @@ func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerC
 	updates, err := m.rawClient.MessagesSendMedia(ctx, mediaReq)
 	if err != nil {
 		log.Printf("[AZML-Go Bot Client] Error sending photo: %v", err)
+		return 0, err
+	}
+	return ExtractMessageID(updates), nil
+}
+
+// SendLocalPhoto uploads a local photo file and sends it to Telegram as a native photo
+func (m *MessageSender) SendLocalPhoto(ctx context.Context, peer tg.InputPeerClass, filePath, caption string, replyToID int) (int, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+
+	u := uploader.NewUploader(m.rawClient)
+	inputFile, err := u.FromBytes(ctx, filepath.Base(filePath), data)
+	if err != nil {
+		return 0, err
+	}
+
+	plainText, entities := ParseFormatting(caption)
+	mediaReq := &tg.MessagesSendMediaRequest{
+		Peer: peer,
+		Media: &tg.InputMediaUploadedPhoto{
+			File: inputFile,
+		},
+		Message:  plainText,
+		Entities: entities,
+		RandomID: time.Now().UnixNano(),
+	}
+	if replyToID != 0 {
+		mediaReq.ReplyTo = &tg.InputReplyToMessage{
+			ReplyToMsgID: replyToID,
+		}
+	}
+
+	updates, err := m.rawClient.MessagesSendMedia(ctx, mediaReq)
+	if err != nil {
+		log.Printf("[AZML-Go Bot Client] Error sending local photo: %v", err)
 		return 0, err
 	}
 	return ExtractMessageID(updates), nil

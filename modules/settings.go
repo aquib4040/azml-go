@@ -3,24 +3,29 @@ package modules
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"azml-go/config"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
 	"azml-go/types"
 
+	tdDownloader "github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
 )
 
 type SettingsModule struct {
+	rawAPI  *tg.Client
 	sender  *telegram.MessageSender
 	userMap *types.SafeUserMap
 }
 
-func NewSettingsModule(sender *telegram.MessageSender, userMap *types.SafeUserMap) *SettingsModule {
+func NewSettingsModule(rawAPI *tg.Client, sender *telegram.MessageSender, userMap *types.SafeUserMap) *SettingsModule {
 	return &SettingsModule{
+		rawAPI:  rawAPI,
 		sender:  sender,
 		userMap: userMap,
 	}
@@ -30,6 +35,96 @@ func (m *SettingsModule) HandleSettings(ctx context.Context, peer tg.InputPeerCl
 	u := m.userMap.GetOrCreate(msg.UserID)
 
 	parts := strings.Fields(msg.Text)
+	isThumbCmd := false
+	if len(parts) >= 1 && strings.Contains(strings.ToLower(parts[0]), "setthumb") {
+		isThumbCmd = true
+	} else if len(parts) >= 2 {
+		subCmd := strings.ToLower(parts[1])
+		if subCmd == "thumb" || subCmd == "setthumb" {
+			isThumbCmd = true
+		}
+	}
+
+	if isThumbCmd {
+		if msg.IsReply && msg.ReplyToID != 0 && m.rawAPI != nil {
+			res, err := m.rawAPI.MessagesGetMessages(ctx, []tg.InputMessageClass{
+				&tg.InputMessageID{ID: msg.ReplyToID},
+			})
+			var targetMsg *tg.Message
+			if err == nil {
+				switch mRes := res.(type) {
+				case *tg.MessagesMessages:
+					if len(mRes.Messages) > 0 {
+						targetMsg, _ = mRes.Messages[0].(*tg.Message)
+					}
+				case *tg.MessagesMessagesSlice:
+					if len(mRes.Messages) > 0 {
+						targetMsg, _ = mRes.Messages[0].(*tg.Message)
+					}
+				case *tg.MessagesChannelMessages:
+					if len(mRes.Messages) > 0 {
+						targetMsg, _ = mRes.Messages[0].(*tg.Message)
+					}
+				}
+			}
+			if targetMsg != nil && targetMsg.Media != nil {
+				if photoMedia, ok := targetMsg.Media.(*tg.MessageMediaPhoto); ok {
+					if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
+						_ = os.MkdirAll("Thumbnails", 0755)
+						destThumb := fmt.Sprintf("Thumbnails/%d.jpg", msg.UserID)
+						thumbSize := "m"
+						if len(photo.Sizes) > 0 {
+							switch s := photo.Sizes[len(photo.Sizes)-1].(type) {
+							case *tg.PhotoSize:
+								thumbSize = s.Type
+							case *tg.PhotoSizeProgressive:
+								thumbSize = s.Type
+							}
+						}
+						dl := tdDownloader.NewDownloader()
+						loc := photo.AsInputPhotoFileLocation(thumbSize)
+						if loc != nil {
+							_, err := dl.Download(m.rawAPI, loc).ToPath(ctx, destThumb)
+							if err == nil {
+								u.CustomThumb = destThumb
+								_ = ext.DB.SaveUser(u)
+								ext.ClearPendingThumbSession(msg.UserID)
+								_, _ = m.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved from replied photo!</b> It will be attached to all your future leeched files.", msg.MessageID, nil)
+								return
+							}
+						}
+					}
+				} else if docMedia, ok := targetMsg.Media.(*tg.MessageMediaDocument); ok {
+					if doc, ok := docMedia.Document.(*tg.Document); ok {
+						_ = os.MkdirAll("Thumbnails", 0755)
+						destThumb := fmt.Sprintf("Thumbnails/%d.jpg", msg.UserID)
+						dl := tdDownloader.NewDownloader()
+						loc := doc.AsInputDocumentFileLocation("")
+						if loc != nil {
+							_, err := dl.Download(m.rawAPI, loc).ToPath(ctx, destThumb)
+							if err == nil {
+								u.CustomThumb = destThumb
+								_ = ext.DB.SaveUser(u)
+								ext.ClearPendingThumbSession(msg.UserID)
+								_, _ = m.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved from replied document!</b> It will be attached to all your future leeched files.", msg.MessageID, nil)
+								return
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Activate 60s listener
+		ext.SetPendingThumbSession(msg.UserID, msg.ChatID, msg.MessageID, 60*time.Second)
+		promptText := "📸 <b>Send Custom Thumbnail</b>\n\n" +
+			"Please send a <b>photo</b> or image document within the next <b>60 seconds</b>.\n\n" +
+			"<i>Once received, it will be automatically saved as your custom thumbnail.</i>\n" +
+			"<i>Send /cancel to abort.</i>"
+		_, _ = m.sender.SendMessage(ctx, peer, promptText, msg.MessageID, nil)
+		return
+	}
+
 	if len(parts) >= 2 {
 		subCmd := strings.ToLower(parts[1])
 		switch subCmd {
@@ -304,6 +399,40 @@ func (m *SettingsModule) buildUniversalMenu(u *types.UserSettings) (string, tg.R
 	return text, btn.BuildMenu(2)
 }
 
+func (m *SettingsModule) buildThumbnailMenu(u *types.UserSettings) (string, tg.ReplyMarkupClass) {
+	status := "Not Set"
+	exists := false
+	if u.CustomThumb != "" {
+		if _, err := os.Stat(u.CustomThumb); err == nil {
+			status = "Configured"
+			exists = true
+		} else {
+			status = "Missing on Disk"
+		}
+	}
+
+	text := fmt.Sprintf("➲ <b><u>Thumbnail Settings for <a href=\"tg://user?id=%d\">%d</a></u></b>\n\n"+
+		"┠ <b>Custom Thumbnail:</b> <code>%s</code>\n"+
+		"┖ <b>Stored Path:</b> <code>%s</code>\n\n"+
+		"<i>Custom thumbnail will be embedded into your leeched files.</i>\n\n"+
+		"• Click <b>Add / Change Thumbnail</b> to activate 60s upload listener.\n"+
+		"• Alternatively reply to a photo with <code>/us thumb</code>.",
+		u.UserID, u.UserID, status, u.CustomThumb)
+
+	btn := telegram.NewButtonMaker()
+	if exists {
+		btn.IButton("🖼 View Thumbnail", fmt.Sprintf("userset %d vthumb", u.UserID))
+		btn.IButton("🗑 Delete Thumbnail", fmt.Sprintf("userset %d dthumb", u.UserID))
+		btn.IButton("🔄 Change Thumbnail", fmt.Sprintf("userset %d cthumb", u.UserID))
+	} else {
+		btn.IButton("➕ Add Thumbnail", fmt.Sprintf("userset %d cthumb", u.UserID))
+	}
+	btn.IButton("🔙 Back", fmt.Sprintf("userset %d leech", u.UserID))
+	btn.IButton("❌ Close", fmt.Sprintf("userset %d close", u.UserID))
+
+	return text, btn.BuildMenu(2)
+}
+
 func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUserID int64) {
 	parts := strings.Fields(data)
 	if len(parts) < 3 {
@@ -339,6 +468,52 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 	case "close":
 		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 		_ = m.sender.AnswerCallback(ctx, queryID, "Settings closed", false)
+	case "thumb":
+		text, markup := m.buildThumbnailMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+	case "cthumb":
+		ext.SetPendingThumbSession(targetUID, 0, msgID, 60*time.Second)
+		prompt := "📸 <b>Send Custom Thumbnail</b>\n\n" +
+			"Please send a <b>photo</b> or image document within the next <b>60 seconds</b>.\n\n" +
+			"<i>Once received, it will be automatically saved as your custom thumbnail.</i>"
+		btn := telegram.NewButtonMaker()
+		btn.IButton("🔙 Cancel", fmt.Sprintf("userset %d cancel_thumb", u.UserID))
+		btn.IButton("❌ Close", fmt.Sprintf("userset %d close", u.UserID))
+		_ = m.sender.EditMessage(ctx, peer, msgID, prompt, btn.BuildMenu(1))
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send your photo within 60s...", false)
+	case "cancel_thumb":
+		ext.ClearPendingThumbSession(targetUID)
+		text, markup := m.buildThumbnailMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Thumbnail setting cancelled", false)
+	case "vthumb":
+		if u.CustomThumb == "" {
+			_ = m.sender.AnswerCallback(ctx, queryID, "No thumbnail configured!", true)
+			return
+		}
+		if _, err := os.Stat(u.CustomThumb); err != nil {
+			_ = m.sender.AnswerCallback(ctx, queryID, "Thumbnail file not found on disk!", true)
+			return
+		}
+		_, err := m.sender.SendLocalPhoto(ctx, peer, u.CustomThumb, "🖼 <b>Your Custom Thumbnail</b>", 0)
+		if err != nil {
+			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Error sending thumbnail: %v", err), true)
+		} else {
+			_ = m.sender.AnswerCallback(ctx, queryID, "Thumbnail sent!", false)
+		}
+	case "dthumb":
+		ext.ClearPendingThumbSession(targetUID)
+		if u.CustomThumb != "" {
+			_ = os.Remove(u.CustomThumb)
+		}
+		dest := fmt.Sprintf("Thumbnails/%d.jpg", targetUID)
+		_ = os.Remove(dest)
+		u.CustomThumb = ""
+		_ = ext.DB.SaveUser(u)
+		text, markup := m.buildThumbnailMenu(u)
+		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.AnswerCallback(ctx, queryID, "✅ Custom thumbnail deleted!", false)
 	case "toggle_autothumb":
 		u.AutoThumb = !u.AutoThumb
 		_ = ext.DB.SaveUser(u)
