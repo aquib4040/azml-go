@@ -3,8 +3,11 @@ package telegram
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/gotd/td/telegram/message/entity"
+	"github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/tg"
 )
 
@@ -18,10 +21,24 @@ func NewMessageSender(rawClient *tg.Client) *MessageSender {
 	}
 }
 
+// ParseFormatting converts HTML markup strings (<b>, <i>, <code>, <a href="...">) into pure text and Telegram entities
+func ParseFormatting(text string) (string, []tg.MessageEntityClass) {
+	if text == "" {
+		return "", nil
+	}
+	var b entity.Builder
+	if err := html.HTML(strings.NewReader(text), &b, html.Options{}); err != nil {
+		return text, nil
+	}
+	return b.Complete()
+}
+
 func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, markup tg.ReplyMarkupClass) (*tg.UpdatesClass, error) {
+	plainText, entities := ParseFormatting(text)
 	req := &tg.MessagesSendMessageRequest{
 		Peer:     peer,
-		Message:  text,
+		Message:  plainText,
+		Entities: entities,
 		RandomID: time.Now().UnixNano(),
 	}
 	if replyToID != 0 {
@@ -42,10 +59,12 @@ func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass,
 }
 
 func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass, msgID int, text string, markup tg.ReplyMarkupClass) error {
+	plainText, entities := ParseFormatting(text)
 	req := &tg.MessagesEditMessageRequest{
-		Peer:    peer,
+		Peer:     peer,
 		ID:      msgID,
-		Message: text,
+		Message:  plainText,
+		Entities: entities,
 	}
 	if markup != nil {
 		req.ReplyMarkup = markup

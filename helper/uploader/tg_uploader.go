@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"azml-go/helper/ext"
+	"azml-go/helper/telegram"
 	"azml-go/types"
 
 	"github.com/gotd/td/telegram/uploader"
@@ -226,10 +227,12 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		inputMedia.SetVideoCover(coverPhoto)
 	}
 
+	plainCaption, captionEntities := telegram.ParseFormatting(opt.Caption)
 	req := &tg.MessagesSendMediaRequest{
 		Peer:     peer,
 		Media:    inputMedia,
-		Message:  opt.Caption,
+		Message:  plainCaption,
+		Entities: captionEntities,
 		RandomID: time.Now().UnixNano(),
 	}
 
