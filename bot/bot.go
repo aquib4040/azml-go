@@ -336,12 +336,21 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		UserID:     senderID,
 		SenderName: senderName,
 		Text:       text,
+		HasMedia:   m.Media != nil,
 	}
 
 	if m.ReplyTo != nil {
 		if header, ok := m.ReplyTo.(*tg.MessageReplyHeader); ok {
 			msgCtx.IsReply = true
 			msgCtx.ReplyToID = header.ReplyToMsgID
+
+			// Populate replied message text and media flags
+			if repliedMsg, err := telegram.FetchMessage(ctx, b.rawAPI, peer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
+				msgCtx.ReplyText = repliedMsg.Message
+				if repliedMsg.Media != nil {
+					msgCtx.HasMedia = true
+				}
+			}
 		}
 	}
 

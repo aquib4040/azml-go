@@ -18,6 +18,7 @@ import (
 	"azml-go/types"
 	"azml-go/web"
 
+	tdDownloader "github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
 )
 
@@ -61,9 +62,20 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 	if isUnzip {
 		opt.IsExtract = true
 	}
+	if opt.Password != "" && !opt.IsZip {
+		opt.IsExtract = true
+	}
 
 	if link == "" && msg.IsReply && msg.ReplyText != "" {
-		link = strings.TrimSpace(msg.ReplyText)
+		for _, w := range strings.Fields(msg.ReplyText) {
+			if strings.HasPrefix(w, "http") || strings.HasPrefix(w, "magnet:") {
+				link = w
+				break
+			}
+		}
+		if link == "" && (strings.HasPrefix(msg.ReplyText, "http") || strings.HasPrefix(msg.ReplyText, "magnet:")) {
+			link = strings.TrimSpace(msg.ReplyText)
+		}
 	}
 
 	// Bulk Leech Handling (-b / -bulk)
@@ -177,7 +189,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		}()
 	}
 
-	if link == "" && !msg.HasMedia {
+	if link == "" && !msg.HasMedia && !msg.IsReply {
 		helpMsg := "<b>Send link along with command or reply to a link/media!</b>\n" +
 			"<b>Usage:</b> <code>/leech [link] [flags]</code>\n" +
 			"<b>Flags:</b>\n" +
@@ -185,6 +197,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 			"<code>-n</code> Custom Name\n" +
 			"<code>-z</code> Zip\n" +
 			"<code>-e</code> Extract / Unzip\n" +
+			"<code>-p</code> Password for extraction / zip\n" +
 			"<code>-ss</code> Screenshots (e.g. <code>-ss 5</code>)\n" +
 			"<code>-d</code> Upload as Document\n" +
 			"<code>-ud</code> Dump Channel ID\n" +
@@ -293,7 +306,101 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 
 	// 1. Download Phase
-	if downloader.IsGDriveLink(link) {
+	if link == "" && (msg.IsReply || msg.HasMedia) {
+		targetMsgID := msg.MessageID
+		if msg.IsReply && msg.ReplyToID > 0 {
+			targetMsgID = msg.ReplyToID
+		}
+
+		targetMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, targetMsgID)
+		if err == nil && targetMsg != nil {
+			if targetMsg.Message != "" {
+				for _, tok := range strings.Fields(targetMsg.Message) {
+					if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
+						link = tok
+						break
+					}
+				}
+			}
+
+			if link == "" && targetMsg.Media != nil {
+				if docMedia, ok := targetMsg.Media.(*tg.MessageMediaDocument); ok {
+					if doc, ok := docMedia.Document.(*tg.Document); ok {
+						fileName := ""
+						for _, attr := range doc.Attributes {
+							if fnAttr, ok := attr.(*tg.DocumentAttributeFilename); ok {
+								fileName = fnAttr.FileName
+								break
+							}
+						}
+						if fileName == "" {
+							fileName = fmt.Sprintf("telegram_doc_%d", doc.ID)
+						}
+						if opt.CustomName != "" {
+							fileName = opt.CustomName
+						}
+						destPath := filepath.Join(taskDir, fileName)
+						uTask.SetName(fileName)
+						uTask.SetSize(doc.Size)
+						uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
+
+						dl := tdDownloader.NewDownloader().WithPartSize(512 * 1024)
+						loc := doc.AsInputDocumentFileLocation("")
+						if loc != nil {
+							stopProgress := make(chan struct{})
+							go func() {
+								ticker := time.NewTicker(1 * time.Second)
+								defer ticker.Stop()
+								var lastBytes int64
+								lastTime := time.Now()
+								for {
+									select {
+									case <-stopProgress:
+										return
+									case <-ticker.C:
+										if fi, statErr := os.Stat(destPath); statErr == nil {
+											cur := fi.Size()
+											now := time.Now()
+											elapsed := now.Sub(lastTime).Seconds()
+											if elapsed > 0 {
+												speed := float64(cur-lastBytes) / elapsed
+												rem := doc.Size - cur
+												eta := "-"
+												if speed > 0 && rem > 0 {
+													eta = ext.GetReadableTime(int64(float64(rem) / speed))
+												}
+												uTask.SetProgress(cur, doc.Size, speed, eta)
+												lastBytes = cur
+												lastTime = now
+											}
+										}
+									}
+								}
+							}()
+
+							_, err := dl.Download(m.rawAPI, loc).ToPath(ctx, destPath)
+							close(stopProgress)
+
+							if err == nil {
+								downloadedPath = destPath
+								uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+							} else {
+								dlErr = err
+							}
+						} else {
+							dlErr = fmt.Errorf("failed to get Telegram document file location")
+						}
+					}
+				}
+			}
+		} else if err != nil {
+			dlErr = fmt.Errorf("failed to fetch replied message: %v", err)
+		}
+	}
+
+	if downloadedPath != "" {
+		// Document downloaded directly via MTProto
+	} else if downloader.IsGDriveLink(link) {
 		gdrive := downloader.GetGDriveClient()
 		fileID := downloader.ExtractGDriveID(link)
 		if fileID == "" {
@@ -527,7 +634,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		uTask.SetProgress(fi.Size(), fi.Size(), 0, "-")
 	}
 
-	// 2. Post-processing: Forceful Archive Extraction (/leech -e, -extract, -uz)
+	// 2. Post-processing: Forceful Archive Extraction (/leech -e, -extract, -uz, -p)
 	// Reads binary magic bytes (PK, 7z, Rar!, etc.) even if the file extension was disguised or missed
 	if opt.IsExtract {
 		uTask.SetStatus(types.StatusExtracting, "7-Zip")
@@ -535,11 +642,12 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		if isArch {
 			log.Printf("[LEECH -e] Detected archive format '%s' via binary header for: %s", archType, downloadedPath)
 			extractDir := filepath.Join(taskDir, "extracted")
-			if outDir, err := ext.ForceExtractArchive(downloadedPath, extractDir, ""); err == nil {
+			if outDir, err := ext.ForceExtractArchive(downloadedPath, extractDir, opt.Password); err == nil {
 				_ = os.Remove(downloadedPath)
 				downloadedPath = outDir
 			} else {
 				log.Printf("[LEECH -e] Extraction error: %v, continuing with original file", err)
+				_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("⚠️ <b>Extraction Warning:</b> %v\nUploading original archive.", err), nil)
 			}
 		} else if fi, err := os.Stat(downloadedPath); err == nil && fi.IsDir() {
 			_ = filepath.Walk(downloadedPath, func(p string, info os.FileInfo, err error) error {
@@ -547,7 +655,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					if isA, aType := ext.IsArchive(p); isA {
 						log.Printf("[LEECH -e] Extracting embedded %s archive: %s", aType, p)
 						extDir := filepath.Join(filepath.Dir(p), "extracted")
-						if _, eErr := ext.ForceExtractArchive(p, extDir, ""); eErr == nil {
+						if _, eErr := ext.ForceExtractArchive(p, extDir, opt.Password); eErr == nil {
 							_ = os.Remove(p)
 						}
 					}
@@ -559,7 +667,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		uTask.SetStatus(types.StatusArchiving, "7-Zip")
 		// Compression requested (-z / -zip)
 		zipTarget := filepath.Join(taskDir, filepath.Base(downloadedPath)+".zip")
-		if err := ext.CompressToZip(downloadedPath, zipTarget, ""); err == nil {
+		if err := ext.CompressToZip(downloadedPath, zipTarget, opt.Password); err == nil {
 			_ = os.RemoveAll(downloadedPath)
 			downloadedPath = zipTarget
 		}
@@ -764,9 +872,47 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 }
 
+func splitArgsRespectingQuotes(s string) []string {
+	var tokens []string
+	var current strings.Builder
+	inDouble := false
+	inSingle := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			} else {
+				current.WriteByte(ch)
+			}
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			} else {
+				current.WriteByte(ch)
+			}
+		case ' ', '\t', '\n', '\r':
+			if inDouble || inSingle {
+				current.WriteByte(ch)
+			} else if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	return tokens
+}
+
 func parseLeechArgs(text string) (types.LeechOptions, string) {
 	var opt types.LeechOptions
-	tokens := strings.Fields(text)
+	tokens := splitArgsRespectingQuotes(text)
 	if len(tokens) <= 1 {
 		return opt, ""
 	}
@@ -786,6 +932,11 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 		case "-n", "-name":
 			if i+1 < len(tokens) {
 				opt.CustomName = tokens[i+1]
+				i++
+			}
+		case "-p", "-password", "-pssw":
+			if i+1 < len(tokens) {
+				opt.Password = tokens[i+1]
 				i++
 			}
 		case "-ss", "-screenshots":
@@ -811,10 +962,32 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 		case "-s", "-select":
 			opt.Select = true
 		default:
-			if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
+			if strings.HasPrefix(tok, "-p") && len(tok) > 2 {
+				opt.Password = strings.TrimPrefix(tok, "-p")
+			} else if strings.HasPrefix(strings.ToLower(tok), "pssw:") {
+				val := strings.TrimPrefix(tok, "pssw:")
+				if val != "" {
+					opt.Password = val
+				} else if i+1 < len(tokens) {
+					opt.Password = tokens[i+1]
+					i++
+				}
+			} else if strings.HasPrefix(strings.ToLower(tok), "password:") {
+				val := strings.TrimPrefix(tok, "password:")
+				if val != "" {
+					opt.Password = val
+				} else if i+1 < len(tokens) {
+					opt.Password = tokens[i+1]
+					i++
+				}
+			} else if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
 				link = tok
 			}
 		}
+	}
+	// If password provided and user didn't specify zip, default to extract
+	if opt.Password != "" && !opt.IsZip {
+		opt.IsExtract = true
 	}
 	return opt, link
 }

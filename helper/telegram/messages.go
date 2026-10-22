@@ -316,3 +316,56 @@ func (m *MessageSender) AnswerCallback(ctx context.Context, queryID int64, text 
 	}
 	return err
 }
+
+// FetchMessage retrieves a message by ID from a given peer (supports User, Chat, and Channel)
+func FetchMessage(ctx context.Context, rawClient *tg.Client, peer tg.InputPeerClass, msgID int) (*tg.Message, error) {
+	if rawClient == nil || msgID == 0 {
+		return nil, fmt.Errorf("invalid client or message ID")
+	}
+
+	var res tg.MessagesMessagesClass
+	var err error
+
+	if pChan, ok := peer.(*tg.InputPeerChannel); ok {
+		hash := pChan.AccessHash
+		if hash == 0 {
+			hash = GetChannelAccessHash(pChan.ChannelID)
+		}
+		res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
+			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+		})
+	} else {
+		res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
+			&tg.InputMessageID{ID: msgID},
+		})
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	switch mRes := res.(type) {
+	case *tg.MessagesMessages:
+		if len(mRes.Messages) > 0 {
+			if m, ok := mRes.Messages[0].(*tg.Message); ok {
+				return m, nil
+			}
+		}
+	case *tg.MessagesMessagesSlice:
+		if len(mRes.Messages) > 0 {
+			if m, ok := mRes.Messages[0].(*tg.Message); ok {
+				return m, nil
+			}
+		}
+	case *tg.MessagesChannelMessages:
+		if len(mRes.Messages) > 0 {
+			if m, ok := mRes.Messages[0].(*tg.Message); ok {
+				return m, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("message not found")
+}
+

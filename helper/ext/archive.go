@@ -129,14 +129,21 @@ func IsArchive(filePath string) (bool, ArchiveType) {
 
 // InspectArchiveSafety inspects an archive before extraction to detect Zip Bombs,
 // excessive file counts, or uncompressed expansion exceeding server disk capacity.
-func InspectArchiveSafety(archivePath string) (uncompressedSize int64, fileCount int, isZipBomb bool, err error) {
+func InspectArchiveSafety(archivePath, password string) (uncompressedSize int64, fileCount int, isZipBomb bool, err error) {
 	fi, sErr := os.Stat(archivePath)
 	if sErr != nil {
 		return 0, 0, false, sErr
 	}
 	compressedSize := fi.Size()
 
-	cmd := exec.Command("7z", "l", "-slt", "-p-", archivePath)
+	args := []string{"l", "-slt"}
+	if password != "" {
+		args = append(args, "-p"+password)
+	} else {
+		args = append(args, "-p-")
+	}
+	args = append(args, archivePath)
+	cmd := exec.Command("7z", args...)
 	output, lErr := cmd.Output()
 	if lErr != nil {
 		// If listing fails (e.g. encrypted headers or unknown format), proceed with caution
@@ -178,7 +185,7 @@ func InspectArchiveSafety(archivePath string) (uncompressedSize int64, fileCount
 // ForceExtractArchive extracts any archive using 7z with Zip Bomb and disk safety checks.
 func ForceExtractArchive(archivePath, targetDir, password string) (string, error) {
 	// 1. Zip Bomb & Safety Pre-check
-	uncompressedSize, count, isBomb, _ := InspectArchiveSafety(archivePath)
+	uncompressedSize, count, isBomb, _ := InspectArchiveSafety(archivePath, password)
 	if isBomb {
 		return "", fmt.Errorf("⚠️ Zip Bomb Protection: archive has abnormal expansion ratio or excessive files (%d files, %s unpacked). Extraction blocked",
 			count, GetReadableFileSize(uncompressedSize))
