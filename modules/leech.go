@@ -395,6 +395,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					mediaSource = targetMsg.Media
 				}
 			} else if err != nil {
+				log.Printf("[LEECH] Failed to fetch replied message %d: %v", msg.ReplyToID, err)
 				dlErr = fmt.Errorf("failed to fetch replied message: %v", err)
 			}
 		}
@@ -473,11 +474,14 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 							downloadedPath = destPath
 							uTask.SetProgress(doc.Size, doc.Size, 0, "-")
 						} else {
+							log.Printf("[LEECH] MTProto document download error: %v", err)
 							dlErr = err
 						}
 					} else {
 						dlErr = fmt.Errorf("failed to get Telegram document file location")
 					}
+				} else {
+					dlErr = fmt.Errorf("replied document is empty or unavailable")
 				}
 			} else if photoMedia, ok := mediaSource.(*tg.MessageMediaPhoto); ok {
 				// Case 1B: Photo Media
@@ -514,12 +518,17 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 								uTask.SetProgress(fi.Size(), fi.Size(), 0, "-")
 							}
 						} else {
+							log.Printf("[LEECH] MTProto photo download error: %v", err)
 							dlErr = err
 						}
 					} else {
 						dlErr = fmt.Errorf("failed to get Telegram photo location")
 					}
+				} else {
+					dlErr = fmt.Errorf("replied photo is empty or unavailable")
 				}
+			} else {
+				dlErr = fmt.Errorf("unsupported media in replied message")
 			}
 		}
 	}
@@ -757,7 +766,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				})
 			}
 		}
-	} else {
+	} else if link != "" {
 		// Fallback Direct HTTP
 		directDl := downloader.NewDirectDownloader()
 		dest := filepath.Join(taskDir, "downloaded_file")
@@ -769,6 +778,10 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			uTask.SetProgress(cur, total, speed, eta)
 		})
 		downloadedPath = dest
+	} else {
+		if dlErr == nil {
+			dlErr = fmt.Errorf("no media or valid link found to download")
+		}
 	}
 
 	if dlErr != nil {
@@ -1192,6 +1205,17 @@ func splitArgsRespectingQuotes(s string) []string {
 	return tokens
 }
 
+func isLeechFlag(tok string) bool {
+	switch tok {
+	case "-b", "-bulk", "-z", "-zip", "-e", "-extract", "-uz", "-unzip",
+		"-d", "-asdoc", "-st", "-streams", "-n", "-name", "-p", "-password",
+		"-pssw", "-ss", "-screenshots", "-ud", "-dump", "-ff", "-i", "-s", "-select":
+		return true
+	default:
+		return strings.HasPrefix(tok, "-")
+	}
+}
+
 func parseLeechArgs(text string) (types.LeechOptions, string) {
 	var opt types.LeechOptions
 	tokens := splitArgsRespectingQuotes(text)
@@ -1212,9 +1236,17 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 		case "-st", "-streams":
 			opt.ExtractStrm = true
 		case "-n", "-name":
-			if i+1 < len(tokens) {
-				opt.CustomName = tokens[i+1]
+			var nameParts []string
+			for i+1 < len(tokens) {
+				nextTok := tokens[i+1]
+				if isLeechFlag(nextTok) || strings.HasPrefix(nextTok, "http://") || strings.HasPrefix(nextTok, "https://") || strings.HasPrefix(nextTok, "magnet:") {
+					break
+				}
+				nameParts = append(nameParts, nextTok)
 				i++
+			}
+			if len(nameParts) > 0 {
+				opt.CustomName = strings.Join(nameParts, " ")
 			}
 		case "-p", "-password", "-pssw":
 			if i+1 < len(tokens) {

@@ -280,11 +280,12 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 					Description string `json:"description"`
 				}
 				if json.NewDecoder(resp.Body).Decode(&res) == nil {
-					if res.Ok || strings.Contains(strings.ToLower(res.Description), "not modified") {
+					descLower := strings.ToLower(res.Description)
+					if res.Ok || strings.Contains(descLower, "not modified") || strings.Contains(descLower, "message to edit not found") || strings.Contains(descLower, "message_id_invalid") {
 						return nil
 					}
 					// If the message is a photo/media message, editMessageText fails; edit caption instead!
-					if strings.Contains(strings.ToLower(res.Description), "no text in the message") {
+					if strings.Contains(descLower, "no text in the message") {
 						capPayload := map[string]interface{}{
 							"chat_id":      chatID,
 							"message_id":   msgID,
@@ -513,10 +514,17 @@ func FetchMessage(ctx context.Context, rawClient *tg.Client, peer tg.InputPeerCl
 		if hash == 0 {
 			hash = GetChannelAccessHash(pChan.ChannelID)
 		}
-		res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-			Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
-			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
-		})
+		if hash != 0 {
+			res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
+				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+			})
+		}
+		if err != nil || hash == 0 {
+			res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
+				&tg.InputMessageID{ID: msgID},
+			})
+		}
 	} else {
 		res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
 			&tg.InputMessageID{ID: msgID},
@@ -529,20 +537,20 @@ func FetchMessage(ctx context.Context, rawClient *tg.Client, peer tg.InputPeerCl
 
 	switch mRes := res.(type) {
 	case *tg.MessagesMessages:
-		if len(mRes.Messages) > 0 {
-			if m, ok := mRes.Messages[0].(*tg.Message); ok {
+		for _, mClass := range mRes.Messages {
+			if m, ok := mClass.(*tg.Message); ok {
 				return m, nil
 			}
 		}
 	case *tg.MessagesMessagesSlice:
-		if len(mRes.Messages) > 0 {
-			if m, ok := mRes.Messages[0].(*tg.Message); ok {
+		for _, mClass := range mRes.Messages {
+			if m, ok := mClass.(*tg.Message); ok {
 				return m, nil
 			}
 		}
 	case *tg.MessagesChannelMessages:
-		if len(mRes.Messages) > 0 {
-			if m, ok := mRes.Messages[0].(*tg.Message); ok {
+		for _, mClass := range mRes.Messages {
+			if m, ok := mClass.(*tg.Message); ok {
 				return m, nil
 			}
 		}

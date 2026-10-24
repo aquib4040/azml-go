@@ -137,6 +137,30 @@ func (h *botUpdateHandler) Handle(ctx context.Context, u tg.UpdatesClass) error 
 		return nil
 
 	default:
+		switch upd := u.(type) {
+		case *tg.Updates:
+			for _, chat := range upd.Chats {
+				if ch, ok := chat.(*tg.Channel); ok && ch.AccessHash != 0 {
+					h.app.cacheChannelAccessHash(ch.ID, ch.AccessHash)
+				}
+			}
+			for _, user := range upd.Users {
+				if usr, ok := user.(*tg.User); ok && usr.AccessHash != 0 {
+					h.app.cacheAccessHash(usr.ID, usr.AccessHash)
+				}
+			}
+		case *tg.UpdatesCombined:
+			for _, chat := range upd.Chats {
+				if ch, ok := chat.(*tg.Channel); ok && ch.AccessHash != 0 {
+					h.app.cacheChannelAccessHash(ch.ID, ch.AccessHash)
+				}
+			}
+			for _, user := range upd.Users {
+				if usr, ok := user.(*tg.User); ok && usr.AccessHash != 0 {
+					h.app.cacheAccessHash(usr.ID, usr.AccessHash)
+				}
+			}
+		}
 		return h.gaps.Handle(ctx, u)
 	}
 }
@@ -425,12 +449,40 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 			msgCtx.IsReply = true
 			msgCtx.ReplyToID = header.ReplyToMsgID
 
-			// Populate replied message text and media flags
-			if repliedMsg, err := telegram.FetchMessage(ctx, b.rawAPI, peer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
+			// 1. Direct media attached to reply header if provided by Telegram
+			if header.ReplyMedia != nil {
+				msgCtx.HasMedia = true
+				msgCtx.RawMedia = header.ReplyMedia
+			}
+
+			// 2. Target peer (handles channel posts in discussion groups / comments)
+			targetPeer := peer
+			if header.ReplyToPeerID != nil {
+				if rPeer := b.getPeerWithEntities(header.ReplyToPeerID, entities); rPeer != nil {
+					targetPeer = rPeer
+				}
+			}
+
+			// 3. Populate replied message text and media
+			if repliedMsg, err := telegram.FetchMessage(ctx, b.rawAPI, targetPeer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
 				msgCtx.ReplyText = repliedMsg.Message
 				if repliedMsg.Media != nil {
 					msgCtx.HasMedia = true
 					msgCtx.RawMedia = repliedMsg.Media
+				}
+			} else {
+				if targetPeer != peer {
+					if rMsg, rErr := telegram.FetchMessage(ctx, b.rawAPI, peer, msgCtx.ReplyToID); rErr == nil && rMsg != nil {
+						msgCtx.ReplyText = rMsg.Message
+						if rMsg.Media != nil {
+							msgCtx.HasMedia = true
+							msgCtx.RawMedia = rMsg.Media
+						}
+					} else {
+						log.Printf("[AZML-Go] Failed to fetch replied message %d: %v (fallback: %v)", msgCtx.ReplyToID, err, rErr)
+					}
+				} else {
+					log.Printf("[AZML-Go] Failed to fetch replied message %d: %v", msgCtx.ReplyToID, err)
 				}
 			}
 		}
