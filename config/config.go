@@ -123,7 +123,7 @@ func LoadConfig(path string) (*Config, error) {
 	GlobalConfig = Config{
 		BotToken:                  getEnv("BOT_TOKEN", ""),
 		OwnerID:                   getEnvInt64("OWNER_ID", 0),
-		OwnerUsername:             strings.TrimPrefix(getEnv("OWNER_USERNAME", "issei_senpai"), "@"),
+		OwnerUsername:             strings.TrimPrefix(getEnv("OWNER_USERNAME", "exe_aquib"), "@"),
 		TelegramAPI:               getEnvInt("TELEGRAM_API", 0),
 		TelegramHash:              getEnv("TELEGRAM_HASH", ""),
 		UserSessionString:         getEnv("USER_SESSION_STRING", ""),

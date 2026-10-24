@@ -52,7 +52,7 @@ func (m *HelpModule) getStartButtons(ownerID int64) *telegram.ButtonMaker {
 
 	ownerUsername := strings.TrimPrefix(strings.TrimSpace(cfg.OwnerUsername), "@")
 	if ownerUsername == "" {
-		ownerUsername = "issei_senpai"
+		ownerUsername = "exe_aquib"
 	}
 	ownerURL := fmt.Sprintf("https://t.me/%s", ownerUsername)
 

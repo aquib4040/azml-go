@@ -3,14 +3,20 @@ package uploader
 import (
 	"bytes"
 	"context"
+	cryptoRand "crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"azml-go/config"
@@ -20,9 +26,16 @@ import (
 
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 var botAPICopyClient = &http.Client{Timeout: 15 * time.Second}
+
+func randID() int64 {
+	var b [8]byte
+	_, _ = cryptoRand.Read(b[:])
+	return int64(binary.LittleEndian.Uint64(b[:]))
+}
 
 func copyMessageViaBotAPI(botToken string, toChatID int64, fromChatID int64, msgID int) bool {
 	if botToken == "" || toChatID == 0 || fromChatID == 0 || msgID <= 0 {
@@ -61,11 +74,10 @@ type TelegramUploader struct {
 }
 
 func NewTelegramUploader(botClient *tg.Client, userClient *tg.Client) *TelegramUploader {
-	// 512KB chunks with 16 parallel workers for blazing-fast upload speed
-	botUp := uploader.NewUploader(botClient).WithPartSize(512 * 1024).WithThreads(16)
+	botUp := uploader.NewUploader(botClient).WithPartSize(512 * 1024).WithThreads(8)
 	var userUp *uploader.Uploader
 	if userClient != nil {
-		userUp = uploader.NewUploader(userClient).WithPartSize(512 * 1024).WithThreads(16)
+		userUp = uploader.NewUploader(userClient).WithPartSize(512 * 1024).WithThreads(8)
 	}
 	return &TelegramUploader{
 		botClient:  botClient,
@@ -90,6 +102,60 @@ type UploadOptions struct {
 	BotPM      bool
 	IsPremium  bool
 	OnProgress UploadProgressFunc
+}
+
+func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte) error {
+	for attempt := 0; attempt < 10; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		partCtx, partCancel := context.WithTimeout(ctx, 45*time.Second)
+		_, err := client.UploadSaveBigFilePart(partCtx, &tg.UploadSaveBigFilePartRequest{
+			FileID:         fileID,
+			FilePart:       partIndex,
+			FileTotalParts: totalParts,
+			Bytes:          bytes,
+		})
+		partCancel()
+		if err == nil {
+			return nil
+		}
+
+		if d, ok := tgerr.AsFloodWait(err); ok {
+			waitTime := d
+			if waitTime < 1*time.Second {
+				waitTime = 1 * time.Second
+			}
+			log.Printf("[AZML-Go Uploader] FLOOD_WAIT on part %d, sleeping %v...", partIndex, waitTime)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime + time.Duration(rand.Intn(400))*time.Millisecond):
+			}
+			continue
+		}
+
+		errStr := err.Error()
+		if strings.Contains(errStr, "connection") || strings.Contains(errStr, "reset") ||
+			strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") ||
+			strings.Contains(errStr, "canceled") || strings.Contains(errStr, "engine was closed") ||
+			strings.Contains(errStr, "engine forcibly closed") || strings.Contains(errStr, "broken pipe") ||
+			strings.Contains(errStr, "write tcp") || strings.Contains(errStr, "read tcp") {
+			log.Printf("[AZML-Go Uploader] Warning: part %d (attempt %d/10) transient error: %s. Retrying in 1s...", partIndex, attempt+1, errStr)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(1*time.Second + time.Duration(rand.Intn(300))*time.Millisecond):
+			}
+			continue
+		}
+
+		return err
+	}
+	return fmt.Errorf("exceeded max retries (10) for part %d", partIndex)
 }
 
 func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClass, opt UploadOptions) (*tg.UpdatesClass, error) {
@@ -133,25 +199,116 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		onProgress:  opt.OnProgress,
 	}
 
-	up := uploader.NewUploader(clientToUse).
-		WithPartSize(512 * 1024).
-		WithThreads(8).
-		WithProgress(tracker)
-
 	var uploadedFile tg.InputFileClass
-	for attempt := 1; attempt <= 3; attempt++ {
-		uploadedFile, err = up.FromPath(ctx, opt.FilePath)
-		if err == nil {
-			break
+
+	// For small files (< 10 MB), use standard uploader
+	if fileSize < 10*1024*1024 {
+		up := uploader.NewUploader(clientToUse).
+			WithPartSize(512 * 1024).
+			WithThreads(4).
+			WithProgress(tracker)
+
+		for attempt := 1; attempt <= 5; attempt++ {
+			uploadedFile, err = up.FromPath(ctx, opt.FilePath)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("upload cancelled: %v", ctx.Err())
+			}
+			log.Printf("[AZML-Go Uploader] Upload attempt %d failed for %s: %v. Retrying in 1s...", attempt, opt.FileName, err)
+			time.Sleep(1 * time.Second)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload small file parts: %v", err)
+		}
+	} else {
+		// Large file (>= 10 MB): Multi-worker chunk uploader with per-part retries (handles broken pipe seamlessly)
+		partSize := int64(512 * 1024)
+		totalParts := int32((fileSize + partSize - 1) / partSize)
+		fileID := randID()
+
+		f, openErr := os.Open(opt.FilePath)
+		if openErr != nil {
+			return nil, fmt.Errorf("failed to open file for parallel upload: %w", openErr)
+		}
+		defer f.Close()
+
+		tasks := make(chan int32, totalParts)
+		for i := int32(0); i < totalParts; i++ {
+			tasks <- i
+		}
+		close(tasks)
+
+		var uploadedBytes atomic.Int64
+		var errOnce sync.Once
+		var firstErr error
+
+		numWorkers := 8
+		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
+			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
+				numWorkers = val
+			}
+		}
+		if numWorkers > 16 {
+			numWorkers = 16
+		}
+		if int(totalParts) < numWorkers {
+			numWorkers = int(totalParts)
+		}
+
+		log.Printf("[AZML-Go Uploader] Parallel chunk upload for %s (%s, %d parts, %d workers)",
+			uploadName, ext.GetReadableFileSize(fileSize), totalParts, numWorkers)
+
+		var wg sync.WaitGroup
+		for w := 0; w < numWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for partIndex := range tasks {
+					if firstErr != nil || ctx.Err() != nil {
+						return
+					}
+					off := int64(partIndex) * partSize
+					pLen := partSize
+					if off+pLen > fileSize {
+						pLen = fileSize - off
+					}
+					buf := make([]byte, pLen)
+					if _, rErr := f.ReadAt(buf, off); rErr != nil && rErr != io.EOF {
+						errOnce.Do(func() {
+							firstErr = fmt.Errorf("failed to read part %d: %w", partIndex, rErr)
+						})
+						return
+					}
+
+					saveErr := saveBigFilePartWithRetry(ctx, clientToUse, fileID, int(partIndex), int(totalParts), buf)
+					if saveErr != nil {
+						errOnce.Do(func() {
+							firstErr = fmt.Errorf("UploadSaveBigFilePart failed for part %d: %w", partIndex, saveErr)
+						})
+						return
+					}
+
+					done := uploadedBytes.Add(int64(len(buf)))
+					tracker.Report(done, fileSize)
+				}
+			}()
+		}
+
+		wg.Wait()
+		if firstErr != nil {
+			return nil, firstErr
 		}
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("upload cancelled: %v", ctx.Err())
+			return nil, ctx.Err()
 		}
-		log.Printf("[AZML-Go Uploader] Upload attempt %d failed for %s: %v. Retrying in 2 seconds...", attempt, opt.FileName, err)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload file parts: %v", err)
+
+		uploadedFile = &tg.InputFileBig{
+			ID:    fileID,
+			Parts: int(totalParts),
+			Name:  uploadName,
+		}
 	}
 
 	var thumbFile tg.InputFileClass
@@ -237,10 +394,27 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		RandomID: time.Now().UnixNano(),
 	}
 
-	res, err := clientToUse.MessagesSendMedia(ctx, req)
-	if err != nil {
-		log.Printf("[AZML-Go Uploader] MessagesSendMedia FAILED for %s (%d bytes) to peer %T: %v", opt.FileName, fileSize, peer, err)
-		return nil, fmt.Errorf("failed to send uploaded media: %v", err)
+	var res tg.UpdatesClass
+	var sendErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		res, sendErr = clientToUse.MessagesSendMedia(ctx, req)
+		if sendErr == nil {
+			break
+		}
+		errStr := sendErr.Error()
+		if strings.Contains(errStr, "engine was closed") || strings.Contains(errStr, "engine forcibly closed") ||
+			strings.Contains(errStr, "connection") || strings.Contains(errStr, "reset") ||
+			strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") ||
+			strings.Contains(errStr, "broken pipe") || strings.Contains(errStr, "write tcp") {
+			log.Printf("[AZML-Go Uploader] Warning: MessagesSendMedia failed (attempt %d/10): %v. Retrying in 2s...", attempt+1, sendErr)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		break
+	}
+	if sendErr != nil {
+		log.Printf("[AZML-Go Uploader] MessagesSendMedia FAILED for %s (%d bytes) to peer %T: %v", opt.FileName, fileSize, peer, sendErr)
+		return nil, fmt.Errorf("failed to send uploaded media: %v", sendErr)
 	}
 	log.Printf("[AZML-Go Uploader] Successfully sent uploaded media for %s to peer %T!", opt.FileName, peer)
 
@@ -256,11 +430,9 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 		fromChatID := telegram.PeerToChatID(peer)
 
-		// Track chats already delivered to avoid ANY duplicate sends (e.g. if LeechLogID == fromChatID or DumpChatID)
 		sentChats := make(map[int64]bool)
 		sentChats[fromChatID] = true
 
-		// 1. Copy to Dump chat if configured (clean copy via Bot API copyMessage, like Python AZML)
 		if opt.DumpChatID != 0 && !sentChats[opt.DumpChatID] {
 			dumpChatID := opt.DumpChatID
 			sentChats[dumpChatID] = true
@@ -283,7 +455,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			}
 		}
 
-		// 2. Copy to Leech Log channel if configured (without forward tag)
 		if opt.LogChatID != 0 && !sentChats[opt.LogChatID] {
 			logChatID := opt.LogChatID
 			sentChats[logChatID] = true
@@ -306,7 +477,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			}
 		}
 
-		// 3. Copy to User PM if BotPM is enabled (AZML route: copy_message = NO forward tag!)
 		if opt.BotPM && opt.UserID != 0 && !sentChats[opt.UserID] {
 			sentChats[opt.UserID] = true
 			if !copyMessageViaBotAPI(botToken, opt.UserID, fromChatID, msgID) {
@@ -337,25 +507,29 @@ type uploadProgressTracker struct {
 	mu          sync.Mutex
 }
 
-func (t *uploadProgressTracker) Chunk(ctx context.Context, state uploader.ProgressState) error {
+func (t *uploadProgressTracker) Report(uploaded, total int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if time.Since(t.lastReport) >= 1500*time.Millisecond {
+	if time.Since(t.lastReport) >= 1500*time.Millisecond || uploaded >= total {
 		elapsed := time.Since(t.uploadStart).Seconds()
 		speed := float64(0)
 		if elapsed > 0 {
-			speed = float64(state.Uploaded) / elapsed
+			speed = float64(uploaded) / elapsed
 		}
 		eta := "-"
-		if speed > 0 && state.Total > state.Uploaded {
-			remSec := int64(float64(state.Total-state.Uploaded) / speed)
+		if speed > 0 && total > uploaded {
+			remSec := int64(float64(total-uploaded) / speed)
 			eta = ext.GetReadableTime(remSec)
 		}
 		if t.onProgress != nil {
-			t.onProgress(state.Uploaded, state.Total, speed, eta)
+			t.onProgress(uploaded, total, speed, eta)
 		}
 		t.lastReport = time.Now()
 	}
+}
+
+func (t *uploadProgressTracker) Chunk(ctx context.Context, state uploader.ProgressState) error {
+	t.Report(state.Uploaded, state.Total)
 	return nil
 }
 
@@ -376,7 +550,6 @@ func isAudioExt(ext string) bool {
 }
 
 func getChannelID(id int64) int64 {
-	// Standard Telegram channel ID prefix is -100
 	idStr := fmt.Sprintf("%d", id)
 	if strings.HasPrefix(idStr, "-100") {
 		idStr = strings.TrimPrefix(idStr, "-100")

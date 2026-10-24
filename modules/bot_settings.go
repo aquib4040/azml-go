@@ -59,7 +59,7 @@ var configVarKeys = []string{
 }
 
 var defaultVarValues = map[string]string{
-	"OWNER_USERNAME":               "issei_senpai",
+	"OWNER_USERNAME":               "exe_aquib",
 	"LEECH_LOG_ID":                 "0",
 	"STATUS_UPDATE_INTERVAL":       "10",
 	"STATUS_LIMIT":                 "4",
