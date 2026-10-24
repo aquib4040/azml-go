@@ -79,7 +79,11 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 	}
 
 	taskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(4)))
-	_ = os.MkdirAll(taskDir, 0755)
+	if err := os.MkdirAll(taskDir, 0777); err != nil {
+		log.Printf("[YTDL] Failed to create taskDir %s: %v, falling back to temp dir", taskDir, err)
+		taskDir = filepath.Join(os.TempDir(), "downloads", fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(4)))
+		_ = os.MkdirAll(taskDir, 0777)
+	}
 
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Fetching Media Info with yt-dlp")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,8 +194,14 @@ func LoadConfig(path string) (*Config, error) {
 		StorageThreshold:          getEnvInt64("STORAGE_THRESHOLD", 1), // Default 1GB safety cushion
 	}
 
-	_ = os.MkdirAll(GlobalConfig.DownloadDir, 0755)
-	_ = os.MkdirAll("Thumbnails", 0755)
+	if err := os.MkdirAll(GlobalConfig.DownloadDir, 0777); err != nil {
+		fallback := filepath.Join(os.TempDir(), "downloads") + string(filepath.Separator)
+		if fErr := os.MkdirAll(fallback, 0777); fErr == nil {
+			log.Printf("[Config] DownloadDir %s not writable (%v), falling back to %s", GlobalConfig.DownloadDir, err, fallback)
+			GlobalConfig.DownloadDir = fallback
+		}
+	}
+	_ = os.MkdirAll("Thumbnails", 0777)
 
 	return &GlobalConfig, nil
 }

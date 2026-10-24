@@ -8,6 +8,8 @@ RUN (python3 -m pip install --no-cache-dir speedtest-cli || pip3 install --no-ca
 
 COPY . .
 
+RUN mkdir -p /usr/src/app/downloads /usr/src/app/Thumbnails && chmod -R 777 /usr/src/app
+
 RUN go build -ldflags="-w -s" -o /usr/local/bin/azml-go . && chmod a+rx /usr/local/bin/azml-go
 
 EXPOSE 23434

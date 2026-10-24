@@ -124,7 +124,10 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		go func() {
 			for _, bLink := range bulkLinks {
 				subTaskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("%d_%s", msg.UserID, ext.RandomHex(4)))
-				_ = os.MkdirAll(subTaskDir, 0755)
+				if err := os.MkdirAll(subTaskDir, 0777); err != nil {
+					subTaskDir = filepath.Join(os.TempDir(), "downloads", fmt.Sprintf("%d_%s", msg.UserID, ext.RandomHex(4)))
+					_ = os.MkdirAll(subTaskDir, 0777)
+				}
 
 				nID, _ := m.sender.SendMessage(context.Background(), peer, fmt.Sprintf("<i>Initiating Leech:</i> <code>%s</code>", truncateString(bLink, 40)), msg.MessageID, nil)
 				if nID > 0 && m.statusMod != nil {
@@ -226,7 +229,11 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 
 	// Create user download folder
 	taskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("%d_%s", msg.UserID, ext.RandomHex(4)))
-	_ = os.MkdirAll(taskDir, 0755)
+	if err := os.MkdirAll(taskDir, 0777); err != nil {
+		log.Printf("[LEECH] Failed to create taskDir %s: %v, falling back to temp dir", taskDir, err)
+		taskDir = filepath.Join(os.TempDir(), "downloads", fmt.Sprintf("%d_%s", msg.UserID, ext.RandomHex(4)))
+		_ = os.MkdirAll(taskDir, 0777)
+	}
 
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Initiating Leech Task")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
@@ -428,7 +435,10 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					if opt.CustomName != "" {
 						fileName = opt.CustomName
 					}
+					fileName = strings.ReplaceAll(fileName, "/", "_")
+					fileName = strings.ReplaceAll(fileName, "\\", "_")
 					destPath := filepath.Join(taskDir, fileName)
+					_ = os.MkdirAll(filepath.Dir(destPath), 0777)
 					uTask.SetName(fileName)
 					uTask.SetSize(doc.Size)
 					uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
@@ -493,7 +503,10 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 							fileName += ".jpg"
 						}
 					}
+					fileName = strings.ReplaceAll(fileName, "/", "_")
+					fileName = strings.ReplaceAll(fileName, "\\", "_")
 					destPath := filepath.Join(taskDir, fileName)
+					_ = os.MkdirAll(filepath.Dir(destPath), 0777)
 					uTask.SetName(fileName)
 					uTask.SetStatus(types.StatusDownloading, "Telegram Photo")
 
