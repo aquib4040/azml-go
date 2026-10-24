@@ -1,15 +1,19 @@
 package uploader
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"azml-go/config"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
 	"azml-go/types"
@@ -17,6 +21,37 @@ import (
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
+
+var botAPICopyClient = &http.Client{Timeout: 15 * time.Second}
+
+func copyMessageViaBotAPI(botToken string, toChatID int64, fromChatID int64, msgID int) bool {
+	if botToken == "" || toChatID == 0 || fromChatID == 0 || msgID <= 0 {
+		return false
+	}
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/copyMessage", botToken)
+	payload := map[string]interface{}{
+		"chat_id":      toChatID,
+		"from_chat_id": fromChatID,
+		"message_id":   msgID,
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := botAPICopyClient.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[AZML-Go Uploader] copyMessage HTTP error to %d: %v", toChatID, err)
+		return false
+	}
+	defer resp.Body.Close()
+	var res struct {
+		Ok          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&res) == nil && res.Ok {
+		log.Printf("[AZML-Go Uploader] copyMessage succeeded to %d without forward tag!", toChatID)
+		return true
+	}
+	log.Printf("[AZML-Go Uploader] copyMessage failed to %d: %s", toChatID, res.Description)
+	return false
+}
 
 type TelegramUploader struct {
 	botClient  *tg.Client
@@ -51,6 +86,8 @@ type UploadOptions struct {
 	AsDoc      bool
 	DumpChatID int64
 	LogChatID  int64
+	UserID     int64
+	BotPM      bool
 	IsPremium  bool
 	OnProgress UploadProgressFunc
 }
@@ -209,39 +246,83 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	msgID := telegram.ExtractMessageID(res)
 	if msgID > 0 {
-		// Forward to Dump chat if configured
-		if opt.DumpChatID != 0 {
-			chID := getChannelID(opt.DumpChatID)
-			dumpPeer := &tg.InputPeerChannel{
-				ChannelID:  chID,
-				AccessHash: telegram.GetChannelAccessHash(chID),
-			}
-			_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-				FromPeer: peer,
-				ToPeer:   dumpPeer,
-				ID:       []int{msgID},
-				RandomID: []int64{time.Now().UnixNano() + 1},
-			})
-			if fErr != nil {
-				log.Printf("[AZML-Go Uploader] Forward to dump failed: %v", fErr)
+		cfg := config.Get()
+		botToken := ""
+		if cfg != nil {
+			botToken = cfg.BotToken
+		}
+		if botToken == "" {
+			botToken = os.Getenv("BOT_TOKEN")
+		}
+		fromChatID := telegram.PeerToChatID(peer)
+
+		// Track chats already delivered to avoid ANY duplicate sends (e.g. if LeechLogID == fromChatID or DumpChatID)
+		sentChats := make(map[int64]bool)
+		sentChats[fromChatID] = true
+
+		// 1. Copy to Dump chat if configured (clean copy via Bot API copyMessage, like Python AZML)
+		if opt.DumpChatID != 0 && !sentChats[opt.DumpChatID] {
+			dumpChatID := opt.DumpChatID
+			sentChats[dumpChatID] = true
+			if !copyMessageViaBotAPI(botToken, dumpChatID, fromChatID, msgID) {
+				chID := getChannelID(dumpChatID)
+				dumpPeer := &tg.InputPeerChannel{
+					ChannelID:  chID,
+					AccessHash: telegram.GetChannelAccessHash(chID),
+				}
+				_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+					FromPeer:   peer,
+					ToPeer:     dumpPeer,
+					ID:         []int{msgID},
+					RandomID:   []int64{time.Now().UnixNano() + 1},
+					DropAuthor: true,
+				})
+				if fErr != nil {
+					log.Printf("[AZML-Go Uploader] Forward to dump failed: %v", fErr)
+				}
 			}
 		}
 
-		// Forward to Leech Log channel if configured
-		if opt.LogChatID != 0 {
-			chID := getChannelID(opt.LogChatID)
-			logPeer := &tg.InputPeerChannel{
-				ChannelID:  chID,
-				AccessHash: telegram.GetChannelAccessHash(chID),
+		// 2. Copy to Leech Log channel if configured (without forward tag)
+		if opt.LogChatID != 0 && !sentChats[opt.LogChatID] {
+			logChatID := opt.LogChatID
+			sentChats[logChatID] = true
+			if !copyMessageViaBotAPI(botToken, logChatID, fromChatID, msgID) {
+				chID := getChannelID(logChatID)
+				logPeer := &tg.InputPeerChannel{
+					ChannelID:  chID,
+					AccessHash: telegram.GetChannelAccessHash(chID),
+				}
+				_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+					FromPeer:   peer,
+					ToPeer:     logPeer,
+					ID:         []int{msgID},
+					RandomID:   []int64{time.Now().UnixNano() + 2},
+					DropAuthor: true,
+				})
+				if fErr != nil {
+					log.Printf("[AZML-Go Uploader] Forward to leech log failed: %v", fErr)
+				}
 			}
-			_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-				FromPeer: peer,
-				ToPeer:   logPeer,
-				ID:       []int{msgID},
-				RandomID: []int64{time.Now().UnixNano() + 2},
-			})
-			if fErr != nil {
-				log.Printf("[AZML-Go Uploader] Forward to leech log failed: %v", fErr)
+		}
+
+		// 3. Copy to User PM if BotPM is enabled (AZML route: copy_message = NO forward tag!)
+		if opt.BotPM && opt.UserID != 0 && !sentChats[opt.UserID] {
+			sentChats[opt.UserID] = true
+			if !copyMessageViaBotAPI(botToken, opt.UserID, fromChatID, msgID) {
+				userPeer := &tg.InputPeerUser{
+					UserID: opt.UserID,
+				}
+				_, pErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+					FromPeer:   peer,
+					ToPeer:     userPeer,
+					ID:         []int{msgID},
+					RandomID:   []int64{time.Now().UnixNano() + 3},
+					DropAuthor: true,
+				})
+				if pErr != nil {
+					log.Printf("[AZML-Go Uploader] Forward to user PM (%d) failed: %v", opt.UserID, pErr)
+				}
 			}
 		}
 	}

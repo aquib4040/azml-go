@@ -113,7 +113,7 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 	if userPin != pinCode {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`<h1 style="color:red;text-align:center;margin-top:20vh;font-family:sans-serif;">❌ Incorrect Security PIN Code</h1>`))
+		_, _ = w.Write([]byte(`<h1 style="color:red;text-align:center;margin-top:20vh;font-family:sans-serif;">× Incorrect Security PIN Code</h1>`))
 		return
 	}
 
@@ -137,7 +137,7 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 	if contentHTML == "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`<h1 style="color:#a855f7;text-align:center;margin-top:20vh;font-family:sans-serif;">⚠️ No files found or session expired for ID: ` + id + `</h1>`))
+		_, _ = w.Write([]byte(`<h1 style="color:#a855f7;text-align:center;margin-top:20vh;font-family:sans-serif;">⌬ No files found or session expired for ID: ` + id + `</h1>`))
 		return
 	}
 

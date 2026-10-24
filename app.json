@@ -1,0 +1,29 @@
+{
+  "description": "High-Performance Telegram Leech & Mirror Bot written in Go",
+  "keywords": ["telegram", "leech", "mirror", "aria2", "go", "azml"],
+  "repository": "https://github.com/isseisenpai0/azml-go",
+  "stack": "container",
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram User ID (e.g. 123456789)",
+      "required": true
+    },
+    "TELEGRAM_API": {
+      "description": "Your Telegram API ID from https://my.telegram.org",
+      "required": true
+    },
+    "TELEGRAM_HASH": {
+      "description": "Your Telegram API Hash from https://my.telegram.org",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "MongoDB URI for persistent settings across dyno restarts (Optional)",
+      "required": false,
+      "value": ""
+    }
+  }
+}

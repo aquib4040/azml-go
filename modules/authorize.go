@@ -43,7 +43,7 @@ func (m *AuthorizeModule) HandleAuthorize(ctx context.Context, peer tg.InputPeer
 	u := m.userMap.GetOrCreate(targetID)
 	u.IsAuth = true
 	_ = ext.DB.SaveUser(u)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>Authorized:</b> <code>%d</code>", targetID), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>Authorized:</b> <code>%d</code>", targetID), msg.MessageID, nil)
 }
 
 func (m *AuthorizeModule) HandleUnauthorize(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -60,7 +60,7 @@ func (m *AuthorizeModule) HandleUnauthorize(ctx context.Context, peer tg.InputPe
 	u := m.userMap.GetOrCreate(targetID)
 	u.IsAuth = false
 	_ = ext.DB.SaveUser(u)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("🚫 <b>Unauthorized:</b> <code>%d</code>", targetID), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("× <b>Unauthorized:</b> <code>%d</code>", targetID), msg.MessageID, nil)
 }
 
 func (m *AuthorizeModule) HandleAddSudo(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -78,7 +78,7 @@ func (m *AuthorizeModule) HandleAddSudo(ctx context.Context, peer tg.InputPeerCl
 	u := m.userMap.GetOrCreate(targetID)
 	u.IsSudo = true
 	_ = ext.DB.SaveUser(u)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("👑 <b>Promoted as Sudo:</b> <code>%d</code>", targetID), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("◈ <b>Promoted as Sudo:</b> <code>%d</code>", targetID), msg.MessageID, nil)
 }
 
 func (m *AuthorizeModule) HandleRmSudo(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -96,7 +96,7 @@ func (m *AuthorizeModule) HandleRmSudo(ctx context.Context, peer tg.InputPeerCla
 	u := m.userMap.GetOrCreate(targetID)
 	u.IsSudo = false
 	_ = ext.DB.SaveUser(u)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("🚫 <b>Demoted from Sudo:</b> <code>%d</code>", targetID), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("× <b>Demoted from Sudo:</b> <code>%d</code>", targetID), msg.MessageID, nil)
 }
 
 func (m *AuthorizeModule) HandleAddPremium(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -124,7 +124,7 @@ func (m *AuthorizeModule) HandleAddPremium(ctx context.Context, peer tg.InputPee
 	if u.ExpiryTime > 0 {
 		expiryStr = ext.GetReadableTime(durationSec)
 	}
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("👑 <b>User Promoted to Premium!</b>\n👤 <b>User ID:</b> <code>%d</code>\n⏱ <b>Duration:</b> <code>%s</code>\n⚡ <b>Benefits:</b> 4GB upload, No token verification", targetID, expiryStr), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("◈ <b>User Promoted to Premium!</b>\n• <b>User ID:</b> <code>%d</code>\n• <b>Duration:</b> <code>%s</code>\n• <b>Benefits:</b> 4GB upload, No token verification", targetID, expiryStr), msg.MessageID, nil)
 }
 
 func (m *AuthorizeModule) HandleRmPremium(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -143,7 +143,7 @@ func (m *AuthorizeModule) HandleRmPremium(ctx context.Context, peer tg.InputPeer
 	u.IsPremium = false
 	u.ExpiryTime = 0
 	_ = ext.DB.SaveUser(u)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("🚫 <b>Premium Removed for:</b> <code>%d</code>", targetID), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("× <b>Premium Removed for:</b> <code>%d</code>", targetID), msg.MessageID, nil)
 }
 
 func (m *AuthorizeModule) HandleCheckPremium(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -159,9 +159,9 @@ func (m *AuthorizeModule) HandleCheckPremium(ctx context.Context, peer tg.InputP
 			remSec := u.ExpiryTime - time.Now().Unix()
 			remStr = ext.GetReadableTime(remSec)
 		}
-		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("👑 <b>Premium User Status:</b>\n👤 <b>User ID:</b> <code>%d</code>\n✅ <b>Status:</b> Active\n⏱ <b>Remaining:</b> <code>%s</code>", targetID, remStr), msg.MessageID, nil)
+		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("◈ <b>Premium User Status:</b>\n• <b>User ID:</b> <code>%d</code>\n✓ <b>Status:</b> Active\n• <b>Remaining:</b> <code>%s</code>", targetID, remStr), msg.MessageID, nil)
 	} else {
-		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("👑 <b>Premium User Status:</b>\n👤 <b>User ID:</b> <code>%d</code>\n❌ <b>Status:</b> Not Premium", targetID), msg.MessageID, nil)
+		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("◈ <b>Premium User Status:</b>\n• <b>User ID:</b> <code>%d</code>\n× <b>Status:</b> Not Premium", targetID), msg.MessageID, nil)
 	}
 }
 

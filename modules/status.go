@@ -21,6 +21,7 @@ type StatusReplyInfo struct {
 	Peer        tg.InputPeerClass
 	CurrentPage int
 	LastEdit    time.Time
+	CreatedAt   time.Time
 }
 
 type StatusModule struct {
@@ -103,12 +104,7 @@ func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass,
 	}
 
 	text, btn := m.taskMgr.BuildStatusMessage(page)
-	var markup tg.ReplyMarkupClass
-	if btn != nil {
-		markup = btn.BuildMenu(3)
-	}
-
-	sentID, err := m.sender.SendMessage(ctx, peer, text, msg.MessageID, markup)
+	sentID, err := m.sender.SendMessageWithButtons(ctx, peer, text, msg.MessageID, btn, 3)
 	if err != nil || sentID <= 0 {
 		return
 	}
@@ -144,6 +140,7 @@ func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPe
 		Peer:        peer,
 		CurrentPage: 1,
 		LastEdit:    time.Time{},
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 	go m.UpdateAllMessages(context.Background(), true)
@@ -195,6 +192,25 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 	m.mu.RUnlock()
 
 	switch parts[1] {
+	case "cancel":
+		if len(parts) >= 3 {
+			gid := parts[2]
+			task := m.taskMgr.GetTask(gid)
+			if task != nil {
+				_ = task.Cancel()
+				m.taskMgr.RemoveTask(gid)
+				_ = m.sender.AnswerCallback(ctx, queryID, "× Task Cancelled!", false)
+				if m.taskMgr.Count() == 0 {
+					m.DeleteAllMessages(context.Background())
+				} else {
+					go m.UpdateAllMessages(context.Background(), true)
+				}
+				return
+			}
+			_ = m.sender.AnswerCallback(ctx, queryID, "Task already finished or not found!", true)
+			return
+		}
+
 	case "close":
 		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 		_ = m.sender.AnswerCallback(ctx, queryID, "Status closed", false)
@@ -233,11 +249,7 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 		}
 
 		text, btn := m.taskMgr.BuildStatusMessage(page)
-		var markup tg.ReplyMarkupClass
-		if btn != nil {
-			markup = btn.BuildMenu(3)
-		}
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 3)
 		_ = m.sender.AnswerCallback(ctx, queryID, "Status Refreshed!", false)
 
 	case "page", "nex", "pre":
@@ -278,18 +290,14 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 		}
 
 		text, btn := m.taskMgr.BuildStatusMessage(page)
-		var markup tg.ReplyMarkupClass
-		if btn != nil {
-			markup = btn.BuildMenu(3)
-		}
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 3)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 	}
 }
 
 // UpdateAllMessages periodically refreshes active status messages on their current active page
 func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
-	// If no tasks are running, automatically delete all status progress messages
+	// If no tasks are running, automatically delete all status progress messages immediately
 	if m.taskMgr.Count() == 0 {
 		m.DeleteAllMessages(ctx)
 		return
@@ -329,12 +337,7 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		}
 
 		text, btn := m.taskMgr.BuildStatusMessage(targetPage)
-		var markup tg.ReplyMarkupClass
-		if btn != nil {
-			markup = btn.BuildMenu(3)
-		}
-
-		err := m.sender.EditMessage(ctx, r.Peer, r.MessageID, text, markup)
+		err := m.sender.EditMessageWithButtons(ctx, r.Peer, r.MessageID, text, btn, 3)
 		if err != nil {
 			if strings.Contains(err.Error(), "MESSAGE_ID_INVALID") || strings.Contains(err.Error(), "400") {
 				m.mu.Lock()

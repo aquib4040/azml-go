@@ -133,21 +133,21 @@ func (m *AnimeModule) HandleAnime(ctx context.Context, peer tg.InputPeerClass, m
 			genres = "N/A"
 		}
 
-		text := fmt.Sprintf("🌸 <b>%s</b>\n"+
-			"⭐ <b>Score:</b> <code>%d%%</code>\n"+
-			"📺 <b>Format:</b> <code>%s</code>\n"+
-			"⚡ <b>Status:</b> <code>%s</code>\n"+
-			"🎞 <b>Episodes:</b> <code>%d (%d min)</code>\n"+
-			"📅 <b>Season:</b> <code>%s %d</code>\n"+
-			"🎭 <b>Genres:</b> <code>%s</code>\n\n"+
-			"📝 <b>Synopsis:</b>\n<i>%s</i>",
+		text := fmt.Sprintf("⌬ <b><u>%s</u></b>\n"+
+			"• <b>Score:</b> <code>%d%%</code>\n"+
+			"• <b>Format:</b> <code>%s</code>\n"+
+			"• <b>Status:</b> <code>%s</code>\n"+
+			"• <b>Episodes:</b> <code>%d (%d min)</code>\n"+
+			"• <b>Season:</b> <code>%s %d</code>\n"+
+			"• <b>Genres:</b> <code>%s</code>\n\n"+
+			"• <b>Synopsis:</b>\n<i>%s</i>",
 			title, media.AverageScore, media.Format, media.Status,
 			media.Episodes, media.Duration, media.Season, media.SeasonYear,
 			genres, desc)
 
 		btn := telegram.NewButtonMaker()
 		if media.SiteURL != "" {
-			btn.UButton("🌸 Open on AniList", media.SiteURL)
+			btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Open on AniList"), media.SiteURL, "primary")
 		}
 
 		_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))

@@ -32,7 +32,7 @@ func SetPendingThumbSession(userID int64, chatID int64, promptMsgID int, d time.
 }
 
 // IsPendingThumbSession checks if userID has an active pending thumbnail upload session
-func IsPendingThumbSession(userID int64) bool {
+func IsPendingThumbSession(userID int64, chatID ...int64) bool {
 	globalThumbState.mu.Lock()
 	defer globalThumbState.mu.Unlock()
 	sess, exists := globalThumbState.pending[userID]
@@ -42,6 +42,11 @@ func IsPendingThumbSession(userID int64) bool {
 	if time.Now().After(sess.ExpiresAt) {
 		delete(globalThumbState.pending, userID)
 		return false
+	}
+	if len(chatID) > 0 && chatID[0] != 0 && sess.ChatID != 0 {
+		if sess.ChatID != chatID[0] {
+			return false
+		}
 	}
 	return true
 }

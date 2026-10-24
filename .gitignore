@@ -8,10 +8,19 @@ azml-go.exe
 coverage.*
 *.out
 
-# Configuration & data
+# Configuration & sensitive credentials
 config.env
+.env
+*.env
+token.pickle
+accounts.zip
+cookies.txt
+shorteners.txt
+terabox.txt
+.netrc
+
+# Runtime data & logs
 user_data.json
 downloads/
 Thumbnails/
 *.log
-.env

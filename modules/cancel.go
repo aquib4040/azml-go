@@ -13,16 +13,18 @@ import (
 )
 
 type CancelModule struct {
-	sender  *telegram.MessageSender
-	taskMgr *ext.TaskManager
-	userMap *types.SafeUserMap
+	sender    *telegram.MessageSender
+	taskMgr   *ext.TaskManager
+	userMap   *types.SafeUserMap
+	statusMod *StatusModule
 }
 
-func NewCancelModule(sender *telegram.MessageSender, userMap *types.SafeUserMap) *CancelModule {
+func NewCancelModule(sender *telegram.MessageSender, userMap *types.SafeUserMap, statusMod *StatusModule) *CancelModule {
 	return &CancelModule{
-		sender:  sender,
-		taskMgr: ext.GetTaskManager(),
-		userMap: userMap,
+		sender:    sender,
+		taskMgr:   ext.GetTaskManager(),
+		userMap:   userMap,
+		statusMod: statusMod,
 	}
 }
 
@@ -34,7 +36,7 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 
 	if ext.IsPendingThumbSession(msg.UserID) {
 		ext.ClearPendingThumbSession(msg.UserID)
-		_, _ = m.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail upload cancelled.</b>", msg.MessageID, nil)
+		_, _ = m.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail upload cancelled.</b>", msg.MessageID, nil)
 		return
 	}
 
@@ -81,7 +83,14 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 
 	_ = task.Cancel()
 	m.taskMgr.RemoveTask(gid)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
+	if m.statusMod != nil {
+		if m.taskMgr.Count() == 0 {
+			m.statusMod.DeleteAllMessages(ctx)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
+		}
+	}
 }
 
 func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -97,13 +106,13 @@ func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerCla
 	}
 
 	btn := telegram.NewButtonMaker()
-	btn.IButton("Downloading", "canall downloading")
-	btn.IButton("Uploading", "canall uploading")
-	btn.IButton("Paused", "canall paused")
-	btn.IButton("QueuedDl", "canall queueddl")
-	btn.IButton("QueuedUp", "canall queueup")
-	btn.IButton("All Tasks", "canall all")
-	btn.IButton("Close", "canall close")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Downloading"), "canall downloading", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Uploading"), "canall uploading", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Paused"), "canall paused", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Queued Dl"), "canall queueddl", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Queued Up"), "canall queueup", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("All Tasks"), "canall all", "danger")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "canall close", "danger")
 
 	_, _ = m.sender.SendMessage(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn.BuildMenu(2))
 }
@@ -129,4 +138,11 @@ func (m *CancelModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 	count := m.taskMgr.CancelAll(action)
 	_ = m.sender.EditMessage(ctx, peer, msgID, fmt.Sprintf("Cancelled <code>%d</code> task(s) matching '%s'", count, action), nil)
 	_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Cancelled %d tasks", count), false)
+	if m.statusMod != nil {
+		if m.taskMgr.Count() == 0 {
+			m.statusMod.DeleteAllMessages(ctx)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
+		}
+	}
 }

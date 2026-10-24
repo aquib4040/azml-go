@@ -3,11 +3,12 @@ package modules
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"azml-go/config"
+	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
 	"azml-go/types"
 
@@ -26,6 +27,120 @@ func NewBotSettingsModule(sender *telegram.MessageSender, userMap *types.SafeUse
 	}
 }
 
+var configVarKeys = []string{
+	"OWNER_USERNAME",
+	"LEECH_LOG_ID",
+	"STATUS_UPDATE_INTERVAL",
+	"STATUS_LIMIT",
+	"LEECH_SPLIT_SIZE",
+	"AS_DOCUMENT",
+	"AUTO_THUMBNAIL",
+	"EQUAL_SPLITS",
+	"MEDIA_GROUP",
+	"LEECH_FILENAME_PREFIX",
+	"LEECH_FILENAME_SUFFIX",
+	"LEECH_FILENAME_CAPTION",
+	"TORRENT_TIMEOUT",
+	"BASE_URL",
+	"BOT_MAX_TASKS",
+	"USER_MAX_TASKS",
+	"LEECH_LIMIT",
+	"TORRENT_LIMIT",
+	"DIRECT_LIMIT",
+	"YTDLP_LIMIT",
+	"MEGA_LIMIT",
+	"DAILY_LEECH_LIMIT",
+	"DAILY_TASK_LIMIT",
+	"AUTO_DELETE_MESSAGE_DURATION",
+	"SHORTENER",
+	"SHORTENER_API",
+	"SHORTENER_ENABLED",
+	"TOKEN_TIMEOUT",
+}
+
+var defaultVarValues = map[string]string{
+	"OWNER_USERNAME":               "issei_senpai",
+	"LEECH_LOG_ID":                 "0",
+	"STATUS_UPDATE_INTERVAL":       "10",
+	"STATUS_LIMIT":                 "4",
+	"LEECH_SPLIT_SIZE":             "0",
+	"AS_DOCUMENT":                  "false",
+	"AUTO_THUMBNAIL":               "false",
+	"EQUAL_SPLITS":                 "false",
+	"MEDIA_GROUP":                  "false",
+	"LEECH_FILENAME_PREFIX":        "",
+	"LEECH_FILENAME_SUFFIX":        "",
+	"LEECH_FILENAME_CAPTION":       "",
+	"TORRENT_TIMEOUT":              "0",
+	"BASE_URL":                     "",
+	"BOT_MAX_TASKS":                "0",
+	"USER_MAX_TASKS":               "0",
+	"LEECH_LIMIT":                  "0",
+	"TORRENT_LIMIT":                "0",
+	"DIRECT_LIMIT":                 "0",
+	"YTDLP_LIMIT":                  "0",
+	"MEGA_LIMIT":                   "0",
+	"DAILY_LEECH_LIMIT":            "0",
+	"DAILY_TASK_LIMIT":             "0",
+	"AUTO_DELETE_MESSAGE_DURATION": "60",
+	"SHORTENER":                    "",
+	"SHORTENER_API":                "",
+	"SHORTENER_ENABLED":            "true",
+	"TOKEN_TIMEOUT":                "0",
+}
+
+func isBoolVar(key string) bool {
+	switch key {
+	case "AS_DOCUMENT", "AUTO_THUMBNAIL", "EQUAL_SPLITS", "MEDIA_GROUP", "SHORTENER_ENABLED":
+		return true
+	default:
+		return false
+	}
+}
+
+func maskAPI(api string) string {
+	if api == "" {
+		return "Not Set"
+	}
+	if len(api) > 8 {
+		return api[:4] + "***" + api[len(api)-4:]
+	}
+	return "***"
+}
+
+func parseDurationSec(s string) int64 {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0
+	}
+	if strings.HasSuffix(s, "d") {
+		d, err := strconv.ParseInt(strings.TrimSuffix(s, "d"), 10, 64)
+		if err == nil {
+			return d * 86400
+		}
+	}
+	if strings.HasSuffix(s, "h") {
+		h, err := strconv.ParseInt(strings.TrimSuffix(s, "h"), 10, 64)
+		if err == nil {
+			return h * 3600
+		}
+	}
+	if strings.HasSuffix(s, "m") {
+		m, err := strconv.ParseInt(strings.TrimSuffix(s, "m"), 10, 64)
+		if err == nil {
+			return m * 60
+		}
+	}
+	if strings.HasSuffix(s, "s") {
+		s = strings.TrimSuffix(s, "s")
+	}
+	sec, err := strconv.ParseInt(s, 10, 64)
+	if err == nil {
+		return sec
+	}
+	return 0
+}
+
 func (m *BotSettingsModule) HandleBotSettings(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
 	if !telegram.IsOwner(msg.UserID) && !telegram.IsSudo(msg.UserID, m.userMap) {
 		_, _ = m.sender.SendMessage(ctx, peer, "Only Owner/Sudo can access Bot Settings!", msg.MessageID, nil)
@@ -37,34 +152,34 @@ func (m *BotSettingsModule) HandleBotSettings(ctx context.Context, peer tg.Input
 		key := strings.ToUpper(parts[1])
 		val := strings.Join(parts[2:], " ")
 		if err := config.UpdateConfigVar(key, val); err == nil {
-			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>%s</b> has been set to: <code>%s</code>", key, val), msg.MessageID, nil)
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>%s</b> has been set to: <code>%s</code>", key, val), msg.MessageID, nil)
 			return
 		}
 	}
 
 	text, btn := m.buildMainMenu()
-	_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, btn.BuildMenu(2))
+	_, _ = m.sender.SendMessageWithButtons(ctx, peer, text, msg.MessageID, btn, 1)
 }
 
 func (m *BotSettingsModule) buildMainMenu() (string, *telegram.ButtonMaker) {
-	text := "🛠 <b>Bot Settings:</b>\n<i>Select a category to view or edit configuration:</i>"
+	text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n<i>Select a category below to view or edit configuration:</i>", telegram.ToSmallCaps("Bot Settings"))
 	btn := telegram.NewButtonMaker()
-	btn.IButton("⚙️ Config Variables", "botset var 0")
-	btn.IButton("🌐 Base URL & Selection", "botset baseurl")
-	btn.IButton("📥 Aria2c Settings", "botset aria")
-	btn.IButton("🔗 Shortener Settings", "botset shortener")
-	btn.IButton("📁 Private Files", "botset private")
-	btn.IButton("❌ Close", "botset close")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Config Variables"), "botset var 0", "primary")
+	btn.Row()
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Private Files"), "botset private", "primary")
+	btn.Row()
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Aria2c Settings"), "botset aria", "primary")
+	btn.Row()
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Shortener Settings"), "botset shortener", "primary")
+	btn.Row()
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
 	return text, btn
 }
 
 func (m *BotSettingsModule) buildVarsMenu(page int) (string, *telegram.ButtonMaker) {
 	cfgMap := config.GetConfigMap()
-	var keys []string
-	for k := range cfgMap {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := configVarKeys
 
 	limit := 8
 	totalPages := (len(keys) + limit - 1) / limit
@@ -82,35 +197,138 @@ func (m *BotSettingsModule) buildVarsMenu(page int) (string, *telegram.ButtonMak
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("⚙️ <b>Config Variables</b> | <b>Page: %d/%d</b>\n\n", page+1, totalPages))
+	sb.WriteString(fmt.Sprintf("⌬ <b><u>%s</u></b> | <b>Page: %d/%d</b>\n\n", telegram.ToSmallCaps("Config Variables"), page+1, totalPages))
 
 	btn := telegram.NewButtonMaker()
 	for i := start; i < end; i++ {
 		k := keys[i]
 		v := cfgMap[k]
+		if v == "" {
+			v = "Not Set"
+		}
 		sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%s</code>\n", k, v))
 
-		if v == "true" || v == "false" {
-			btn.IButton(fmt.Sprintf("Toggle %s", k), fmt.Sprintf("botset toggle %s %d", k, page))
-		} else {
-			btn.IButton(k, fmt.Sprintf("botset edit %s %d", k, page))
+		btn.IButtonStyled("◈ "+telegram.ToSmallCaps(k), fmt.Sprintf("botset editvar %s %d", k, page), "primary")
+		if (i-start)%2 == 1 || i == end-1 {
+			btn.Row()
 		}
 	}
-	sb.WriteString("\n<i>Tap on a boolean to toggle it, or a variable to edit.</i>")
+	sb.WriteString("\n<i>Tap on a variable to view, toggle, or edit its value in-place.</i>")
 
-	if page > 0 {
-		btn.IButton("◀️ Prev", fmt.Sprintf("botset var %d", page-1))
+	// Page jump buttons (AZML style numbered jump bar, up to 6 per row)
+	for p := 0; p < totalPages; p++ {
+		if p == page {
+			btn.IButtonStyled(fmt.Sprintf("« %d »", p+1), fmt.Sprintf("botset var %d", p), "success")
+		} else {
+			btn.IButtonStyled(fmt.Sprintf("%d", p+1), fmt.Sprintf("botset var %d", p), "primary")
+		}
+		if (p+1)%6 == 0 || p == totalPages-1 {
+			btn.Row()
+		}
 	}
-	btn.IButton("🔙 Back", "botset back")
-	if page < totalPages-1 {
-		btn.IButton("Next ▶️", fmt.Sprintf("botset var %d", page+1))
-	}
+
+	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset back", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
 
 	return sb.String(), btn
 }
 
+func (m *BotSettingsModule) buildVarDetailMenu(key string, page int, editing bool) (string, *telegram.ButtonMaker) {
+	cfgMap := config.GetConfigMap()
+	v, exists := cfgMap[key]
+	if !exists || v == "" {
+		v = "Not Set"
+	}
+
+	btn := telegram.NewButtonMaker()
+
+	if isBoolVar(key) {
+		text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"┠ <b>Variable:</b> <code>%s</code>\n"+
+			"┖ <b>Current Value:</b> <code>%s</code>\n\n"+
+			"<i>Choose a valid value for the above Var:</i>",
+			telegram.ToSmallCaps("Boolean Configuration"), key, v)
+
+		btn.IButtonStyled("✓ "+telegram.ToSmallCaps("True"), fmt.Sprintf("botset boolvar %s true %d", key, page), "success")
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("False"), fmt.Sprintf("botset boolvar %s false %d", key, page), "danger")
+		btn.Row()
+		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), fmt.Sprintf("botset var %d", page), "primary")
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+		btn.Row()
+		return text, btn
+	}
+
+	if editing {
+		text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"┠ <b>Variable:</b> <code>%s</code>\n"+
+			"┖ <b>Current Value:</b> <code>%s</code>\n\n"+
+			"<i>Send a valid value for the above Var in chat.</i> <b>Timeout:</b> 60 sec\n"+
+			"<i>Send /cancel to abort.</i>",
+			telegram.ToSmallCaps("Edit Variable"), key, v)
+
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel Edit"), fmt.Sprintf("botset editvar %s %d", key, page), "danger")
+		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), fmt.Sprintf("botset var %d", page), "primary")
+		btn.Row()
+		return text, btn
+	}
+
+	text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+		"┠ <b>Variable:</b> <code>%s</code>\n"+
+		"┖ <b>Current Value:</b> <code>%s</code>\n\n"+
+		"<i>Click <b>Edit Value</b> to update this setting directly:</i>",
+		telegram.ToSmallCaps("Variable Details"), key, v)
+
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Edit Value"), fmt.Sprintf("botset editvar_prompt %s %d", key, page), "success")
+	btn.IButtonStyled("• "+telegram.ToSmallCaps("Reset"), fmt.Sprintf("botset resetvar %s %d", key, page), "danger")
+	btn.Row()
+	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), fmt.Sprintf("botset var %d", page), "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
+
+	return text, btn
+}
+
+func (m *BotSettingsModule) HandleSessionValue(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int) {
+	val = strings.TrimSpace(val)
+	if key == "TOKEN_TIMEOUT" && page == -1 {
+		sec := parseDurationSec(val)
+		if sec > 0 {
+			_ = config.UpdateConfigVar("TOKEN_TIMEOUT", strconv.FormatInt(sec, 10))
+			_ = config.UpdateConfigVar("SHORTENER_ENABLED", "true")
+		} else {
+			_ = config.UpdateConfigVar("TOKEN_TIMEOUT", val)
+		}
+	} else {
+		_ = config.UpdateConfigVar(key, val)
+	}
+
+	if page == -1 || key == "SHORTENER" || key == "SHORTENER_API" {
+		text, btn := m.buildShortenerMenu()
+		text += fmt.Sprintf("\n\n✓ <i>%s updated successfully!</i>", key)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		return
+	}
+
+	text, btn := m.buildVarDetailMenu(key, page, false)
+	text += "\n\n✓ <i>Value updated successfully!</i>"
+	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+}
+
+func (m *BotSettingsModule) HandleSessionCancelled(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key string, page int) {
+	if page == -1 || key == "SHORTENER" || key == "SHORTENER_API" {
+		text, btn := m.buildShortenerMenu()
+		text += "\n\n× <i>Edit cancelled.</i>"
+		_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		return
+	}
+	text, btn := m.buildVarDetailMenu(key, page, false)
+	text += "\n\n× <i>Edit cancelled.</i>"
+	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+}
+
 func (m *BotSettingsModule) buildAriaMenu() (string, *telegram.ButtonMaker) {
-	text := "📥 <b>Aria2c Performance Settings:</b>\n\n" +
+	text := "⌬ <b><u>Aria2c Performance Settings</u>:</b>\n\n" +
 		"┠ <b>max-connection-per-server:</b> <code>16</code> (Max)\n" +
 		"┠ <b>split:</b> <code>16</code> (Max)\n" +
 		"┠ <b>min-split-size:</b> <code>1M</code>\n" +
@@ -120,71 +338,28 @@ func (m *BotSettingsModule) buildAriaMenu() (string, *telegram.ButtonMaker) {
 		"<i>Optimized for peak network throughput on free tier VPS servers.</i>"
 
 	btn := telegram.NewButtonMaker()
-	btn.IButton("🔙 Back", "botset back")
-	btn.IButton("❌ Close", "botset close")
-	return text, btn
-}
-
-func (m *BotSettingsModule) buildShortenerMenu() (string, *telegram.ButtonMaker) {
-	cfg := config.Get()
-	status := "Disabled"
-	if cfg.ShortenerEnabled {
-		status = "Enabled"
-	}
-	domain := cfg.Shortener
-	if domain == "" {
-		domain = "Not Set"
-	}
-
-	text := fmt.Sprintf("🔗 <b>Shortener Settings:</b>\n\n"+
-		"┠ <b>Status:</b> <code>%s</code>\n"+
-		"┠ <b>Domain:</b> <code>%s</code>\n"+
-		"┠ <b>API Key:</b> <code>%s</code>\n"+
-		"┠ <b>Token Timeout:</b> <code>%d sec</code>\n"+
-		"┖ <b>Login Pass:</b> <code>%s</code>",
-		status, domain, cfg.ShortenerAPI, cfg.TokenTimeout, cfg.LoginPass)
-
-	btn := telegram.NewButtonMaker()
-	btn.IButton("Toggle Shortener", "botset toggle SHORTENER_ENABLED 0")
-	btn.IButton("🔙 Back", "botset back")
-	btn.IButton("❌ Close", "botset close")
-	return text, btn
-}
-
-func (m *BotSettingsModule) buildBaseURLMenu() (string, *telegram.ButtonMaker) {
-	cfg := config.Get()
-	bURL := cfg.BaseURL
-	if bURL == "" {
-		bURL = fmt.Sprintf("http://localhost:%d", cfg.BaseURLPort)
-	}
-	text := fmt.Sprintf("🌐 <b>Base URL & Web Selection Configuration:</b>\n\n"+
-		"┠ <b>BASE_URL:</b> <code>%s</code>\n"+
-		"┠ <b>BASE_URL_PORT:</b> <code>%d</code>\n"+
-		"┖ <b>Web Selector:</b> <i>Active and listening on port %d</i>\n\n"+
-		"<i>The Base URL is used for web file selection (Torrents, Magnets, Mega, and Google Drive).</i>",
-		bURL, cfg.BaseURLPort, cfg.BaseURLPort)
-
-	btn := telegram.NewButtonMaker()
-	btn.IButton("Edit BASE_URL", "botset edit BASE_URL 0")
-	btn.IButton("Edit BASE_URL_PORT", "botset edit BASE_URL_PORT 0")
-	btn.IButton("🔙 Back", "botset back")
-	btn.IButton("❌ Close", "botset close")
+	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset back", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
 	return text, btn
 }
 
 func (m *BotSettingsModule) buildPrivateMenu() (string, *telegram.ButtonMaker) {
-	text := "📁 <b>Private Files:</b>\n\n" +
-		"<i>Send any of these private files as a document directly to the bot:</i>\n\n" +
-		"┠ <code>token.pickle</code> — Google Drive OAuth token (automatically loaded)\n" +
-		"┠ <code>config.env</code> — Bot environment variables (auto reloaded)\n" +
-		"┠ <code>cookies.txt</code> — Netscape cookies for yt-dlp & aria2c\n" +
-		"┖ <code>accounts.zip</code> — Service accounts archive\n\n" +
-		"<b>Automatic Processing:</b>\n" +
-		"When you share <code>token.pickle</code> to the bot, it is automatically saved to the root directory and Google Drive OAuth credentials are reloaded immediately."
+	text := fmt.Sprintf("⌬ <b><u>%s:</u></b>\n\n"+
+		"<i>Send any of these private files as a document directly to the bot:</i>\n\n"+
+		"┠ <code>token.pickle</code> — Google Drive OAuth token (automatically loaded)\n"+
+		"┠ <code>config.env</code> — Bot environment variables (auto reloaded)\n"+
+		"┠ <code>cookies.txt</code> — Netscape cookies for yt-dlp & aria2c\n"+
+		"┠ <code>shorteners.txt</code> — Multi-shortener routing file (auto reloaded)\n"+
+		"┖ <code>accounts.zip</code> — Service accounts archive\n\n"+
+		"<b>Automatic Processing:</b>\n"+
+		"When you share <code>token.pickle</code> or <code>shorteners.txt</code> to the bot, they are automatically saved and reloaded immediately.",
+		telegram.ToSmallCaps("Private Files"))
 
 	btn := telegram.NewButtonMaker()
-	btn.IButton("🔙 Back", "botset back")
-	btn.IButton("❌ Close", "botset close")
+	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset back", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
 	return text, btn
 }
 
@@ -202,59 +377,247 @@ func (m *BotSettingsModule) HandleCallback(ctx context.Context, peer tg.InputPee
 	action := parts[1]
 	switch action {
 	case "close":
+		ext.ClearPendingBotSettingSession(fromUID)
 		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 		_ = m.sender.AnswerCallback(ctx, queryID, "Closed", false)
+
 	case "back":
+		ext.ClearPendingBotSettingSession(fromUID)
 		text, btn := m.buildMainMenu()
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 1)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
-	case "baseurl":
-		text, btn := m.buildBaseURLMenu()
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
-		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+
 	case "var":
+		ext.ClearPendingBotSettingSession(fromUID)
 		page := 0
 		if len(parts) >= 3 {
 			page, _ = strconv.Atoi(parts[2])
 		}
 		text, btn := m.buildVarsMenu(page)
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
-	case "toggle":
+
+	case "editvar":
+		ext.ClearPendingBotSettingSession(fromUID)
 		if len(parts) >= 3 {
 			key := parts[2]
-			cfgMap := config.GetConfigMap()
-			curr := cfgMap[key] == "true"
-			newVal := "false"
-			if !curr {
-				newVal = "true"
-			}
-			_ = config.UpdateConfigVar(key, newVal)
-
 			page := 0
 			if len(parts) >= 4 {
 				page, _ = strconv.Atoi(parts[3])
 			}
-			text, btn := m.buildVarsMenu(page)
-			_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
-			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("%s set to %s", key, newVal), false)
+			text, btn := m.buildVarDetailMenu(key, page, false)
+			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+			_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 		}
-	case "edit":
+
+	case "editvar_prompt":
 		if len(parts) >= 3 {
 			key := parts[2]
-			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("To edit %s, send /bsetting %s [value]", key, key), true)
+			page := 0
+			if len(parts) >= 4 {
+				page, _ = strconv.Atoi(parts[3])
+			}
+			ext.SetPendingBotSettingSession(fromUID, key, 0, msgID, page, 60*time.Second)
+			text, btn := m.buildVarDetailMenu(key, page, true)
+			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+			_ = m.sender.AnswerCallback(ctx, queryID, "Send new value within 60s...", false)
 		}
+
+	case "boolvar":
+		if len(parts) >= 4 {
+			key := parts[2]
+			val := parts[3]
+			page := 0
+			if len(parts) >= 5 {
+				page, _ = strconv.Atoi(parts[4])
+			}
+			_ = config.UpdateConfigVar(key, val)
+			text, btn := m.buildVarDetailMenu(key, page, false)
+			text += fmt.Sprintf("\n\n✓ <i>%s set to %s!</i>", key, val)
+			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("%s set to %s", key, val), false)
+		}
+
+	case "resetvar":
+		if len(parts) >= 3 {
+			key := parts[2]
+			page := 0
+			if len(parts) >= 4 {
+				page, _ = strconv.Atoi(parts[3])
+			}
+			defVal := defaultVarValues[key]
+			_ = config.UpdateConfigVar(key, defVal)
+			text, btn := m.buildVarDetailMenu(key, page, false)
+			text += fmt.Sprintf("\n\n• <i>%s reset to default: %s</i>", key, defVal)
+			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("%s reset to default", key), false)
+		}
+
 	case "aria":
 		text, btn := m.buildAriaMenu()
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
-	case "shortener":
-		text, btn := m.buildShortenerMenu()
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
-		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+
 	case "private":
 		text, btn := m.buildPrivateMenu()
-		_ = m.sender.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(2))
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+
+	case "shortener":
+		text, btn := m.buildShortenerMenu()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+
+	case "toggleshrt":
+		cfg := config.Get()
+		if cfg.ShortenerEnabled && cfg.TokenTimeout > 0 {
+			_ = config.UpdateConfigVar("SHORTENER_ENABLED", "false")
+			_ = m.sender.AnswerCallback(ctx, queryID, "Shortener Disabled!", false)
+		} else {
+			_ = config.UpdateConfigVar("SHORTENER_ENABLED", "true")
+			if cfg.TokenTimeout <= 0 {
+				_ = config.UpdateConfigVar("TOKEN_TIMEOUT", "86400")
+			}
+			_ = m.sender.AnswerCallback(ctx, queryID, "Shortener Enabled (24 Hours)!", false)
+		}
+		text, btn := m.buildShortenerMenu()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+
+	case "setshrt":
+		if len(parts) >= 3 {
+			sec := parts[2]
+			_ = config.UpdateConfigVar("TOKEN_TIMEOUT", sec)
+			_ = config.UpdateConfigVar("SHORTENER_ENABLED", "true")
+			valInt, _ := strconv.ParseInt(sec, 10, 64)
+			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Validity set to %s", ext.GetReadableTime(valInt)), false)
+		}
+		text, btn := m.buildShortenerMenu()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+
+	case "prompt_shrt_domain":
+		cfg := config.Get()
+		cur := cfg.Shortener
+		if cur == "" {
+			cur = "Not Set"
+		}
+		ext.SetPendingBotSettingSession(fromUID, "SHORTENER", 0, msgID, -1, 60*time.Second)
+		promptText := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"┠ <b>Current Domain:</b> <code>%s</code>\n\n"+
+			"<i>Send the shortener domain (e.g. <code>droplink.co</code> or <code>https://api.shareus.io/short?api=%%s&url=%%s</code>).</i>\n"+
+			"<b>Timeout:</b> 60 sec\n"+
+			"<i>Send /cancel to abort.</i>",
+			telegram.ToSmallCaps("Set Shortener Domain"), cur)
+		btn := telegram.NewButtonMaker()
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), "botset shortener", "danger")
+		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset shortener", "primary")
+		btn.Row()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, promptText, btn, 2)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send shortener domain within 60s...", false)
+
+	case "prompt_shrt_api":
+		cfg := config.Get()
+		cur := maskAPI(cfg.ShortenerAPI)
+		ext.SetPendingBotSettingSession(fromUID, "SHORTENER_API", 0, msgID, -1, 60*time.Second)
+		promptText := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"┠ <b>Current API Key:</b> <code>%s</code>\n\n"+
+			"<i>Send your shortener API key in chat.</i>\n"+
+			"<b>Timeout:</b> 60 sec\n"+
+			"<i>Send /cancel to abort.</i>",
+			telegram.ToSmallCaps("Set Shortener API Key"), cur)
+		btn := telegram.NewButtonMaker()
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), "botset shortener", "danger")
+		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset shortener", "primary")
+		btn.Row()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, promptText, btn, 2)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send shortener API key within 60s...", false)
+
+	case "prompt_shrt_val":
+		cfg := config.Get()
+		cur := ext.GetReadableTime(cfg.TokenTimeout)
+		ext.SetPendingBotSettingSession(fromUID, "TOKEN_TIMEOUT", 0, msgID, -1, 60*time.Second)
+		promptText := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"┠ <b>Current Validity:</b> <code>%s</code>\n\n"+
+			"<i>Send custom validity duration in seconds (e.g. <code>86400</code>) or with suffix (e.g. <code>24h</code>, <code>12h</code>, <code>2d</code>).</i>\n"+
+			"<b>Timeout:</b> 60 sec\n"+
+			"<i>Send /cancel to abort.</i>",
+			telegram.ToSmallCaps("Custom Token Validity"), cur)
+		btn := telegram.NewButtonMaker()
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), "botset shortener", "danger")
+		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset shortener", "primary")
+		btn.Row()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, promptText, btn, 2)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send validity duration within 60s...", false)
 	}
+}
+
+func (m *BotSettingsModule) buildShortenerMenu() (string, *telegram.ButtonMaker) {
+	cfg := config.Get()
+	isActive := cfg.ShortenerEnabled && cfg.TokenTimeout > 0
+	valStr := ext.GetReadableTime(cfg.TokenTimeout)
+	if !isActive {
+		valStr = "Disabled (None)"
+	}
+
+	stEmoji := "Disabled"
+	if isActive {
+		stEmoji = "Enabled"
+	}
+
+	shDomain := cfg.Shortener
+	if shDomain == "" {
+		shDomain = "Not Set"
+	}
+	shAPI := maskAPI(cfg.ShortenerAPI)
+
+	shorteners := ext.GetShorteners()
+	shrtsCount := len(shorteners)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("⌬ <b><u>%s :</u></b>\n\n"+
+		"┎ <b>Shortener Access :</b> <code>%s</code>\n"+
+		"┠ <b>Token Validity :</b> <code>%s</code>\n"+
+		"┠ <b>Default Domain :</b> <code>%s</code>\n"+
+		"┖ <b>Default API Key :</b> <code>%s</code>\n\n",
+		telegram.ToSmallCaps("Shortener Settings"), stEmoji, valStr, shDomain, shAPI))
+
+	if shrtsCount > 0 {
+		sb.WriteString(fmt.Sprintf("➲ <b><u>%s (%d) :</u></b>\n", telegram.ToSmallCaps("Multi Shorteners"), shrtsCount))
+		for i, sh := range shorteners {
+			if i >= 5 {
+				sb.WriteString(fmt.Sprintf("• <i>... and %d more in shorteners.txt</i>\n", shrtsCount-5))
+				break
+			}
+			masked := maskAPI(sh.APIKey)
+			sb.WriteString(fmt.Sprintf("• <code>%d. %s</code> | <i>Key:</i> <code>%s</code>\n", i+1, sh.Domain, masked))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("➲ <b>Description:</b> <i>When enabled, users must generate a temporary token via shortener before leeching.</i>")
+
+	btn := telegram.NewButtonMaker()
+	if isActive {
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Disable Shortener"), "botset toggleshrt", "danger")
+	} else {
+		btn.IButtonStyled("✓ "+telegram.ToSmallCaps("Enable Shortener (24h)"), "botset toggleshrt", "success")
+	}
+	btn.Row()
+
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("24 Hours"), "botset setshrt 86400", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("12 Hours"), "botset setshrt 43200", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("6 Hours"), "botset setshrt 21600", "primary")
+	btn.Row()
+
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Set Domain"), "botset prompt_shrt_domain", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Set API Key"), "botset prompt_shrt_api", "primary")
+	btn.Row()
+
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Custom Validity"), "botset prompt_shrt_val", "primary")
+	btn.Row()
+
+	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset back", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
+
+	return sb.String(), btn
 }

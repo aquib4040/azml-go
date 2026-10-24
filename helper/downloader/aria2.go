@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,10 +82,20 @@ var (
 	aria2Once   sync.Once
 )
 
+func getAria2Port() int {
+	if val := os.Getenv("ARIA2_PORT"); val != "" {
+		if p, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && p > 0 {
+			return p
+		}
+	}
+	return 6810
+}
+
 func GetAria2Client() *Aria2RPCClient {
 	aria2Once.Do(func() {
+		port := getAria2Port()
 		Aria2Client = &Aria2RPCClient{
-			rpcURL: "http://127.0.0.1:6800/jsonrpc",
+			rpcURL: fmt.Sprintf("http://127.0.0.1:%d/jsonrpc", port),
 			httpClient: &http.Client{
 				Timeout: 10 * time.Second,
 			},
@@ -98,7 +109,9 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Check if already running on port 6800
+	port := getAria2Port()
+
+	// Check if already running on this port
 	req := JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      "ping",
@@ -131,7 +144,7 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 	cmd := exec.Command(binName,
 		"--enable-rpc",
 		"--rpc-listen-all=true",
-		"--rpc-listen-port=6800",
+		fmt.Sprintf("--rpc-listen-port=%d", port),
 		"--max-connection-per-server=16",
 		"--split=16",
 		"--min-split-size=1M",
@@ -140,8 +153,9 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--allow-overwrite=true",
 		"--auto-file-renaming=true",
 		"--summary-interval=1",
-		"--disk-cache=64M",
-		"--bt-max-peers=128",
+		"--disk-cache=32M",
+		"--bt-max-peers=64",
+		"--max-upload-limit=1K",
 		"--bt-request-peer-speed-limit=0",
 		"--seed-time=0",
 		"--seed-ratio=0.0",
@@ -149,7 +163,7 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--bt-require-crypto=true",
 		"--bt-min-crypto-level=arc4",
 		"--enable-dht=true",
-		"--dht-listen-port=6881",
+		fmt.Sprintf("--dht-listen-port=%d", port+80),
 		"--bt-enable-lpd=true",
 		"--follow-torrent=mem",
 		"--bt-tracker="+defaultTrackers,
@@ -196,7 +210,8 @@ func (a *Aria2RPCClient) AddURI(link, downloadDir, filename string, headers []st
 		"min-split-size":              "1M",
 		"allow-overwrite":             "true",
 		"check-certificate":           "false",
-		"bt-max-peers":                "128",
+		"bt-max-peers":                "64",
+		"max-upload-limit":            "1K",
 		"bt-request-peer-speed-limit": "0",
 		"seed-time":                   "0",
 		"seed-ratio":                  "0.0",
@@ -246,7 +261,8 @@ func (a *Aria2RPCClient) AddTorrent(torrentFilePath, downloadDir string) (string
 		"max-connection-per-server":   "16",
 		"split":                       "16",
 		"min-split-size":              "1M",
-		"bt-max-peers":                "128",
+		"bt-max-peers":                "64",
+		"max-upload-limit":            "1K",
 		"bt-request-peer-speed-limit": "0",
 		"seed-time":                   "0",
 		"seed-ratio":                  "0.0",
@@ -498,12 +514,22 @@ func (t *Aria2DownloadTask) PollUntilComplete(ctx context.Context, onProgress fu
 				}
 				path := t.downloadPath
 				t.mu.Unlock()
-				// Immediately sever all peer connections & remove torrent to prevent any seeding
-				_ = t.client.Cancel(t.gid)
+				// Only sever peer connections & remove torrent to prevent background seeding for BitTorrent
+				if res.Bittorrent != nil {
+					_ = t.client.Cancel(t.gid)
+				}
 				return path, nil
 			case "error":
 				return "", fmt.Errorf("aria2 download failed: %s", res.ErrorMessage)
 			case "removed":
+				t.mu.RLock()
+				path := t.downloadPath
+				t.mu.RUnlock()
+				if path != "" {
+					if fi, sErr := os.Stat(path); sErr == nil && fi.Size() > 0 {
+						return path, nil
+					}
+				}
 				return "", errors.New("download cancelled or removed from aria2")
 			}
 		}

@@ -89,14 +89,14 @@ func (m *ImdbModule) HandleImdb(ctx context.Context, peer tg.InputPeerClass, msg
 				}
 				if json.NewDecoder(fbResp.Body).Decode(&fbData) == nil && len(fbData.Description) > 0 {
 					item := fbData.Description[0]
-					text := fmt.Sprintf("🎬 <b>%s (%d)</b>\n"+
-						"👥 <b>Actors:</b> <code>%s</code>\n"+
-						"🆔 <b>IMDb ID:</b> <code>%s</code>",
+					text := fmt.Sprintf("⌬ <b><u>%s (%d)</u></b>\n"+
+						"• <b>Actors:</b> <code>%s</code>\n"+
+						"• <b>IMDb ID:</b> <code>%s</code>",
 						item.Title, item.Year, item.Actors, item.IMDbID)
 
 					btn := telegram.NewButtonMaker()
 					if item.IMDbURL != "" {
-						btn.UButton("🎬 Open on IMDb", item.IMDbURL)
+						btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Open on IMDb"), item.IMDbURL, "primary")
 					}
 					_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))
 					return
@@ -132,14 +132,14 @@ func (m *ImdbModule) HandleImdb(ctx context.Context, peer tg.InputPeerClass, msg
 			overview = overview[:500] + "..."
 		}
 
-		text := fmt.Sprintf("🎬 <b>%s (%s)</b>\n"+
-			"⭐ <b>Rating:</b> <code>%.1f / 10</code>\n"+
-			"📅 <b>Release:</b> <code>%s</code>\n\n"+
-			"📝 <b>Overview:</b>\n<i>%s</i>",
+		text := fmt.Sprintf("⌬ <b><u>%s (%s)</u></b>\n"+
+			"• <b>Rating:</b> <code>%.1f / 10</code>\n"+
+			"• <b>Release:</b> <code>%s</code>\n\n"+
+			"• <b>Overview:</b>\n<i>%s</i>",
 			name, year, item.VoteAverage, date, overview)
 
 		btn := telegram.NewButtonMaker()
-		btn.UButton("🔍 TMDb Page", fmt.Sprintf("https://www.themoviedb.org/%s/%d", "movie", item.ID))
+		btn.UButtonStyled("◈ "+telegram.ToSmallCaps("TMDb Page"), fmt.Sprintf("https://www.themoviedb.org/%s/%d", "movie", item.ID), "primary")
 		_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))
 	}()
 }

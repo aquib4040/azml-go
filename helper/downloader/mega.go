@@ -37,15 +37,55 @@ func NewMegaDownloader() *MegaDownloader {
 	}
 }
 
-func (m *MegaDownloader) Download(ctx context.Context, megaURL, outDir string, onProgress func(cur, total int64)) (string, error) {
+func (m *MegaDownloader) Download(ctx context.Context, megaURL, outDir string, onProgress func(cur, total int64, speed float64, eta string)) (string, error) {
 	_ = os.MkdirAll(outDir, 0755)
 
-	// Try first via aria2c if it's an exportable stream link, or use mega-get / megadl
-	// If mega-get is present in PATH
+	// Helper to track outDir file growth during external CLI process execution
+	trackProgress := func(stopChan chan struct{}) {
+		if onProgress == nil {
+			return
+		}
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		lastTime := time.Now()
+		var lastCur int64
+
+		for {
+			select {
+			case <-stopChan:
+				return
+			case <-ticker.C:
+				var cur int64
+				_ = filepath.Walk(outDir, func(p string, fi os.FileInfo, err error) error {
+					if err == nil && !fi.IsDir() {
+						cur += fi.Size()
+					}
+					return nil
+				})
+				now := time.Now()
+				elapsed := now.Sub(lastTime).Seconds()
+				speed := float64(0)
+				if elapsed > 0 {
+					speed = float64(cur-lastCur) / elapsed
+				}
+				if cur > 0 {
+					onProgress(cur, 0, speed, "-")
+				}
+				lastCur = cur
+				lastTime = now
+			}
+		}
+	}
+
+	// 1. Try mega-get if present in PATH
 	if _, err := exec.LookPath("mega-get"); err == nil {
 		cmd := exec.CommandContext(ctx, "mega-get", megaURL, outDir)
-		if err := cmd.Run(); err == nil {
-			// Find downloaded file in outDir
+		stopChan := make(chan struct{})
+		go trackProgress(stopChan)
+		runErr := cmd.Run()
+		close(stopChan)
+
+		if runErr == nil {
 			files, _ := os.ReadDir(outDir)
 			if len(files) > 0 {
 				return filepath.Join(outDir, files[0].Name()), nil
@@ -53,7 +93,7 @@ func (m *MegaDownloader) Download(ctx context.Context, megaURL, outDir string, o
 		}
 	}
 
-	// Try megadl (part of megatools)
+	// 2. Try megadl (part of megatools)
 	if _, err := exec.LookPath("megadl"); err == nil {
 		args := []string{"--path", outDir}
 		if m.email != "" && m.password != "" {
@@ -61,7 +101,12 @@ func (m *MegaDownloader) Download(ctx context.Context, megaURL, outDir string, o
 		}
 		args = append(args, megaURL)
 		cmd := exec.CommandContext(ctx, "megadl", args...)
-		if err := cmd.Run(); err == nil {
+		stopChan := make(chan struct{})
+		go trackProgress(stopChan)
+		runErr := cmd.Run()
+		close(stopChan)
+
+		if runErr == nil {
 			files, _ := os.ReadDir(outDir)
 			if len(files) > 0 {
 				return filepath.Join(outDir, files[0].Name()), nil
@@ -69,7 +114,7 @@ func (m *MegaDownloader) Download(ctx context.Context, megaURL, outDir string, o
 		}
 	}
 
-	// Fallback to Aria2c RPC direct download
+	// 3. Fallback to Aria2c RPC direct download
 	aria := GetAria2Client()
 	gid, err := aria.AddURI(megaURL, outDir, "", nil)
 	if err != nil {
@@ -77,7 +122,11 @@ func (m *MegaDownloader) Download(ctx context.Context, megaURL, outDir string, o
 	}
 
 	task := NewAria2DownloadTask(gid, "Mega Download", outDir, 0, 0, 0)
-	return task.PollUntilComplete(ctx, onProgress)
+	return task.PollUntilComplete(ctx, func(c, t int64) {
+		if onProgress != nil {
+			onProgress(c, t, task.Speed(), task.ETA())
+		}
+	})
 }
 
 type MegaDownloadTask struct {
