@@ -129,7 +129,6 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			if waitTime < 1*time.Second {
 				waitTime = 1 * time.Second
 			}
-			log.Printf("[AZML-Go Uploader] FLOOD_WAIT on part %d, sleeping %v...", partIndex, waitTime)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -144,7 +143,9 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			strings.Contains(errStr, "canceled") || strings.Contains(errStr, "engine was closed") ||
 			strings.Contains(errStr, "engine forcibly closed") || strings.Contains(errStr, "broken pipe") ||
 			strings.Contains(errStr, "write tcp") || strings.Contains(errStr, "read tcp") {
-			log.Printf("[AZML-Go Uploader] Warning: part %d (attempt %d/10) transient error: %s. Retrying in 1s...", partIndex, attempt+1, errStr)
+			if attempt > 3 {
+				log.Printf("[AZML-Go Uploader] Warning: part %d (attempt %d/10) transient error: %s. Retrying...", partIndex, attempt+1, errStr)
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
