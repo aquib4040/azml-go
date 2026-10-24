@@ -271,56 +271,6 @@ func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.Inpu
 	if btn == nil {
 		return m.SendMessage(ctx, peer, text, replyToID, nil)
 	}
-
-	botToken := os.Getenv("BOT_TOKEN")
-	chatID := PeerToChatID(peer)
-
-	if btn.HasStyle() && botToken != "" && chatID != 0 {
-		kbJSON := btn.BuildBotAPIKeyboard(cols)
-		payload := map[string]interface{}{
-			"chat_id":                  chatID,
-			"text":                     text,
-			"parse_mode":               "HTML",
-			"reply_markup":             json.RawMessage(kbJSON),
-			"disable_web_page_preview": true,
-		}
-		if replyToID != 0 {
-			payload["reply_to_message_id"] = replyToID
-		}
-		body, _ := json.Marshal(payload)
-		for attempt := 0; attempt < 2; attempt++ {
-			req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), bytes.NewReader(body))
-			if err != nil {
-				break
-			}
-			req.Header.Set("Content-Type", "application/json")
-			resp, rErr := botAPIHTTPClient.Do(req)
-			if rErr != nil {
-				break
-			}
-			defer resp.Body.Close()
-			var res struct {
-				Ok         bool `json:"ok"`
-				Result     struct {
-					MessageID int `json:"message_id"`
-				} `json:"result"`
-				Parameters struct {
-					RetryAfter int `json:"retry_after"`
-				} `json:"parameters"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&res) == nil {
-				if res.Ok {
-					return res.Result.MessageID, nil
-				}
-				if res.Parameters.RetryAfter > 0 && res.Parameters.RetryAfter <= 5 {
-					time.Sleep(time.Duration(res.Parameters.RetryAfter)*time.Second + 100*time.Millisecond)
-					continue
-				}
-			}
-			break
-		}
-	}
-
 	return m.SendMessage(ctx, peer, text, replyToID, btn.BuildMenu(cols))
 }
 
@@ -331,73 +281,6 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 	if btn == nil {
 		return m.EditMessage(ctx, peer, msgID, text, nil)
 	}
-
-	botToken := os.Getenv("BOT_TOKEN")
-	chatID := PeerToChatID(peer)
-
-	if btn.HasStyle() && botToken != "" && chatID != 0 {
-		kbJSON := btn.BuildBotAPIKeyboard(cols)
-		payload := map[string]interface{}{
-			"chat_id":                  chatID,
-			"message_id":               msgID,
-			"text":                     text,
-			"parse_mode":               "HTML",
-			"reply_markup":             json.RawMessage(kbJSON),
-			"disable_web_page_preview": true,
-		}
-		body, _ := json.Marshal(payload)
-		for attempt := 0; attempt < 2; attempt++ {
-			req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken), bytes.NewReader(body))
-			if err != nil {
-				break
-			}
-			req.Header.Set("Content-Type", "application/json")
-			resp, rErr := botAPIHTTPClient.Do(req)
-			if rErr != nil {
-				break
-			}
-			defer resp.Body.Close()
-			var res struct {
-				Ok          bool   `json:"ok"`
-				Description string `json:"description"`
-				Parameters  struct {
-					RetryAfter int `json:"retry_after"`
-				} `json:"parameters"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&res) == nil {
-				descLower := strings.ToLower(res.Description)
-				if res.Ok || strings.Contains(descLower, "not modified") || strings.Contains(descLower, "message to edit not found") || strings.Contains(descLower, "message_id_invalid") {
-					return nil
-				}
-				if res.Parameters.RetryAfter > 0 && res.Parameters.RetryAfter <= 5 {
-					time.Sleep(time.Duration(res.Parameters.RetryAfter)*time.Second + 100*time.Millisecond)
-					continue
-				}
-				// If the message is a photo/media message, editMessageText fails; edit caption instead!
-				if strings.Contains(descLower, "no text in the message") {
-					capPayload := map[string]interface{}{
-						"chat_id":      chatID,
-						"message_id":   msgID,
-						"caption":      text,
-						"parse_mode":   "HTML",
-						"reply_markup": json.RawMessage(kbJSON),
-					}
-					cBody, _ := json.Marshal(capPayload)
-					cReq, cErr := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken), bytes.NewReader(cBody))
-					if cErr == nil {
-						cReq.Header.Set("Content-Type", "application/json")
-						cResp, crErr := botAPIHTTPClient.Do(cReq)
-						if crErr == nil {
-							cResp.Body.Close()
-							return nil
-						}
-					}
-				}
-			}
-			break
-		}
-	}
-
 	return m.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(cols))
 }
 

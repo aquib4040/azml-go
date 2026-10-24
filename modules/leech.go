@@ -925,7 +925,9 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				rawCmd = preset
 			}
 		}
-		outFFmpeg := filepath.Join(taskDir, "ff_"+filepath.Base(downloadedPath))
+		ffDir := filepath.Join(taskDir, "ff_tmp")
+		_ = os.MkdirAll(ffDir, 0755)
+		outFFmpeg := filepath.Join(ffDir, filepath.Base(downloadedPath))
 		if fErr := ext.ExecuteCustomFFmpeg(downloadedPath, outFFmpeg, rawCmd, cfg.FFmpegEncoding); fErr == nil {
 			_ = os.Remove(downloadedPath)
 			downloadedPath = outFFmpeg
@@ -998,10 +1000,16 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 
 	for _, curFile := range filesToUpload {
+		origBase := filepath.Base(curFile)
+		origBase = strings.TrimPrefix(origBase, "meta_")
+		origBase = strings.TrimPrefix(origBase, "ff_")
+
 		// Metadata editing
 		if user != nil && len(user.Metadata) > 0 {
 			uTask.SetStatus(types.StatusFFmpeg, "FFmpeg")
-			outMeta := filepath.Join(taskDir, "meta_"+filepath.Base(curFile))
+			metaDir := filepath.Join(taskDir, "meta_tmp")
+			_ = os.MkdirAll(metaDir, 0755)
+			outMeta := filepath.Join(metaDir, origBase)
 			if err := ext.EditMetadata(curFile, outMeta, user.Metadata); err == nil {
 				_ = os.Remove(curFile)
 				curFile = outMeta
@@ -1009,7 +1017,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		}
 
 		// File Renaming
-		finalName, caption := ext.FormatFilename(filepath.Base(curFile), user, curFile)
+		finalName, caption := ext.FormatFilename(origBase, user, curFile)
 		if opt.CustomName != "" && len(filesToUpload) == 1 {
 			finalName = opt.CustomName
 		}

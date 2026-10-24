@@ -372,9 +372,14 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 
 	// Check if user is in an active pending setting prompt session (e.g. from /us)
 	if sess, ok := ext.GetPendingSettingSession(senderID, chatID); ok && sess != nil {
+		inMsgID := m.ID
 		if text == "/cancel" {
 			ext.ClearPendingSettingSession(senderID)
-			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			go func() {
+				delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+			}()
 			if sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
 				u := b.userMap.GetOrCreate(senderID)
 				b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, sess.Key)
@@ -383,7 +388,11 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		}
 		if !strings.HasPrefix(text, "/") {
 			ext.ClearPendingSettingSession(senderID)
-			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			go func() {
+				delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+			}()
 			u := b.userMap.GetOrCreate(senderID)
 			b.applyUserSettingValue(ctx, peer, u, sess.Key, text, sess.PromptMsgID)
 			return
@@ -392,9 +401,14 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 
 	// Check if user is in an active pending bot setting prompt session (from /bs)
 	if bSess, ok := ext.GetPendingBotSettingSession(senderID, chatID); ok && bSess != nil {
+		inMsgID := m.ID
 		if text == "/cancel" {
 			ext.ClearPendingBotSettingSession(senderID)
-			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			go func() {
+				delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+			}()
 			if b.bsettingCancelHandler != nil {
 				b.bsettingCancelHandler(ctx, peer, bSess.PromptMsgID, bSess.Key, bSess.Page)
 			}
@@ -402,7 +416,11 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		}
 		if !strings.HasPrefix(text, "/") {
 			ext.ClearPendingBotSettingSession(senderID)
-			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			go func() {
+				delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+			}()
 			if b.bsettingInputHandler != nil {
 				b.bsettingInputHandler(ctx, peer, bSess.PromptMsgID, bSess.Key, text, bSess.Page)
 			}
@@ -411,8 +429,13 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	}
 
 	if ext.IsPendingThumbSession(senderID, chatID) && text == "/cancel" {
+		inMsgID := m.ID
 		ext.ClearPendingThumbSession(senderID)
-		_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+		go func() {
+			delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+		}()
 		return
 	}
 
