@@ -1,5 +1,4 @@
 {
-  "name": "AZML-Go",
   "description": "High-Performance Telegram Leech & Mirror Bot written in Go",
   "keywords": ["telegram", "leech", "mirror", "aria2", "go", "azml"],
   "repository": "https://github.com/isseisenpai0/azml-go",
@@ -25,11 +24,6 @@
       "description": "MongoDB URI for persistent settings across dyno restarts (Optional)",
       "required": false,
       "value": ""
-    }
-  },
-  "formation": {
-    "web": {
-      "quantity": 1
     }
   }
 }
