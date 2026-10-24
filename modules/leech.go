@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -236,10 +237,6 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 }
 
 func (m *LeechModule) sendDownloadError(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, notifyID int, errStr string, mode string, startTime time.Time) {
-	if m.statusMod != nil {
-		m.statusMod.RemoveStatusMessage(msg.ChatID)
-	}
-
 	tag := fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", msg.UserID, telegram.EscapeHTML(msg.SenderName))
 	if msg.Username != "" {
 		tag = "@" + msg.Username
@@ -255,9 +252,16 @@ func (m *LeechModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCl
 		tag, telegram.EscapeHTML(errStr), mode, elapsed)
 
 	if notifyID > 0 {
-		_ = m.sender.EditMessage(ctx, peer, notifyID, errMsg, nil)
-	} else {
-		_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
+		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	}
+	_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
+
+	if m.statusMod != nil {
+		if m.taskMgr.Count() == 0 {
+			m.statusMod.DeleteAllMessages(ctx)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
+		}
 	}
 }
 
@@ -704,7 +708,16 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			}
 		} else {
 			// All other magnets, torrents, and DDL links are routed through Aria2c with 16 connections
-			gid, err := aria.AddURI(link, taskDir, opt.CustomName, nil)
+			// Make URI distinct with fragment tag so concurrent duplicate URLs download into separate task directories independently
+			ariaLink := link
+			if strings.HasPrefix(ariaLink, "http://") || strings.HasPrefix(ariaLink, "https://") {
+				if strings.Contains(ariaLink, "#") {
+					ariaLink += "_" + taskUID
+				} else {
+					ariaLink += "#" + taskUID
+				}
+			}
+			gid, err := aria.AddURI(ariaLink, taskDir, opt.CustomName, nil)
 			if err != nil {
 				// If Aria2c is unreachable or errors on HTTP/HTTPS DDL link, seamlessly fallback to DirectDownloader!
 				if ext.IsURL(link) && (strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://")) {
@@ -760,6 +773,17 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	if dlErr != nil {
 		ext.ReleaseDownload(taskUID)
+		if errors.Is(dlErr, context.Canceled) || strings.Contains(strings.ToLower(dlErr.Error()), "cancel") {
+			m.taskMgr.RemoveTask(taskUID)
+			if m.statusMod != nil {
+				if m.taskMgr.Count() == 0 {
+					m.statusMod.DeleteAllMessages(ctx)
+				} else {
+					go m.statusMod.UpdateAllMessages(ctx, true)
+				}
+			}
+			return
+		}
 		m.sendDownloadError(ctx, peer, msg, notifyID, dlErr.Error(), modeStr, taskStartTime)
 		return
 	}
@@ -1121,10 +1145,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	m.taskMgr.RemoveTask(taskUID)
 	if m.taskMgr.Count() == 0 {
 		if m.statusMod != nil {
-			m.statusMod.RemoveStatusMessage(msg.ChatID)
-		}
-		if notifyID > 0 {
-			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+			m.statusMod.DeleteAllMessages(ctx)
 		}
 	} else {
 		if m.statusMod != nil {

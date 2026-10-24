@@ -55,6 +55,7 @@ type BotApp struct {
 	cancelAllHandler func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelCbHandler  func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	settingsHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	autoRenameHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	settingsCbHandler     func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	settingsUpdateHandler func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, u *types.UserSettings, key string)
 	bsettingHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
@@ -213,6 +214,9 @@ func (b *BotApp) SetSettingsHandlers(
 	b.settingsHandler = h
 	b.settingsCbHandler = cb
 	b.settingsUpdateHandler = update
+}
+func (b *BotApp) SetAutoRenameHandler(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
+	b.autoRenameHandler = h
 }
 func (b *BotApp) SetBotSettingsHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)) {
 	b.bsettingHandler = h
@@ -524,6 +528,10 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	case telegram.MatchCommand(text, telegram.BotCommands.UserSetting, b.botUsername):
 		if b.settingsHandler != nil {
 			b.settingsHandler(ctx, peer, msgCtx)
+		}
+	case telegram.MatchCommand(text, telegram.BotCommands.AutoRename, b.botUsername):
+		if b.autoRenameHandler != nil {
+			b.autoRenameHandler(ctx, peer, msgCtx)
 		}
 	case telegram.MatchCommand(text, telegram.BotCommands.BotSetting, b.botUsername):
 		if b.bsettingHandler != nil {
@@ -1105,6 +1113,25 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 					return true
 				}
 				_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>accounts.zip</b> received and saved successfully!", m.ID, nil)
+				return true
+
+			case "shorteners.txt":
+				if !telegram.IsOwner(senderID) && !telegram.IsSudo(senderID, b.userMap) {
+					_, _ = b.sender.SendMessage(ctx, peer, "Only Owner/Sudo can upload <code>shorteners.txt</code>!", m.ID, nil)
+					return true
+				}
+				dl := tdDownloader.NewDownloader()
+				loc := doc.AsInputDocumentFileLocation("")
+				if loc == nil {
+					return false
+				}
+				_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, "shorteners.txt")
+				if err != nil {
+					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("× Error downloading <b>shorteners.txt</b>: %v", err), m.ID, nil)
+					return true
+				}
+				ext.LoadShorteners()
+				_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>shorteners.txt</b> received and saved! %d shortener(s) loaded.", len(ext.GetShorteners())), m.ID, nil)
 				return true
 			}
 

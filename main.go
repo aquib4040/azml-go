@@ -49,6 +49,7 @@ func main() {
 
 	// Initialize Database (MongoDB or local JSON fallback)
 	ext.InitDB()
+	ext.LoadShorteners()
 
 	// Ensure Aria2c is started with 16 connections
 	ariaClient := downloader.GetAria2Client()
@@ -70,7 +71,7 @@ func main() {
 	statusMod := modules.NewStatusModule(sender)
 	leechMod := modules.NewLeechModule(app.GetRawAPI(), sender, uploader, userMap, statusMod)
 	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap, statusMod)
-	cancelMod := modules.NewCancelModule(sender, userMap)
+	cancelMod := modules.NewCancelModule(sender, userMap, statusMod)
 	settingsMod := modules.NewSettingsModule(app.GetRawAPI(), sender, userMap)
 	botSetMod := modules.NewBotSettingsModule(sender, userMap)
 	authMod := modules.NewAuthorizeModule(sender, userMap)
@@ -86,6 +87,7 @@ func main() {
 	app.SetStatusHandlers(statusMod.HandleStatus, statusMod.HandleCallback)
 	app.SetCancelHandlers(cancelMod.HandleCancel, cancelMod.HandleCancelAll, cancelMod.HandleCallback)
 	app.SetSettingsHandlers(settingsMod.HandleSettings, settingsMod.HandleCallback, settingsMod.HandleSettingUpdated)
+	app.SetAutoRenameHandler(settingsMod.HandleAutoRename)
 	app.SetBotSettingsHandlers(botSetMod.HandleBotSettings, botSetMod.HandleCallback)
 	app.SetBotSettingsInputHandlers(botSetMod.HandleSessionValue, botSetMod.HandleSessionCancelled)
 	app.SetAuthorizeHandlers(

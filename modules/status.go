@@ -200,7 +200,11 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 				_ = task.Cancel()
 				m.taskMgr.RemoveTask(gid)
 				_ = m.sender.AnswerCallback(ctx, queryID, "× Task Cancelled!", false)
-				go m.UpdateAllMessages(context.Background(), true)
+				if m.taskMgr.Count() == 0 {
+					m.DeleteAllMessages(context.Background())
+				} else {
+					go m.UpdateAllMessages(context.Background(), true)
+				}
 				return
 			}
 			_ = m.sender.AnswerCallback(ctx, queryID, "Task already finished or not found!", true)
@@ -293,20 +297,9 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 
 // UpdateAllMessages periodically refreshes active status messages on their current active page
 func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
-	// If no tasks are running, automatically delete old status progress messages (except recently created ones)
+	// If no tasks are running, automatically delete all status progress messages immediately
 	if m.taskMgr.Count() == 0 {
-		m.mu.Lock()
-		hasRecent := false
-		for _, r := range m.statusReplies {
-			if time.Since(r.CreatedAt) < 15*time.Second {
-				hasRecent = true
-				break
-			}
-		}
-		m.mu.Unlock()
-		if !hasRecent {
-			m.DeleteAllMessages(ctx)
-		}
+		m.DeleteAllMessages(ctx)
 		return
 	}
 

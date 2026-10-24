@@ -388,6 +388,10 @@ func GetConfigMap() map[string]string {
 		"MEGA_LIMIT":                   strconv.FormatInt(GlobalConfig.MegaLimit, 10),
 		"DAILY_LEECH_LIMIT":            strconv.FormatInt(GlobalConfig.DailyLeechLimit, 10),
 		"DAILY_TASK_LIMIT":             strconv.Itoa(GlobalConfig.DailyTaskLimit),
+		"SHORTENER":                    GlobalConfig.Shortener,
+		"SHORTENER_API":                GlobalConfig.ShortenerAPI,
+		"SHORTENER_ENABLED":            strconv.FormatBool(GlobalConfig.ShortenerEnabled),
+		"TOKEN_TIMEOUT":                strconv.FormatInt(GlobalConfig.TokenTimeout, 10),
 	}
 }
 

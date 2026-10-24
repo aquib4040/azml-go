@@ -1185,3 +1185,64 @@ func (m *SettingsModule) HandleSettingUpdated(ctx context.Context, peer tg.Input
 	}
 	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
 }
+
+func (m *SettingsModule) HandleAutoRename(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
+	u := m.userMap.GetOrCreate(msg.UserID)
+	parts := strings.SplitN(strings.TrimSpace(msg.Text), " ", 2)
+
+	// --- No argument: show current template or help ---
+	if len(parts) == 1 || strings.TrimSpace(parts[1]) == "" {
+		current := u.RemnameAuto
+		if current == "" {
+			current = config.Get().LeechFilenameRemnameAuto
+		}
+
+		if current != "" {
+			text := fmt.Sprintf("⌬ <b><u>%s :</u></b>\n\n"+
+				"<code>%s</code>\n\n"+
+				"<b>Usage:</b> <code>/ar [template]</code>\n"+
+				"<b>Clear:</b> <code>/ar off</code>",
+				telegram.ToSmallCaps("Current AutoRename Template"),
+				telegram.EscapeHTML(current))
+			_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, nil)
+		} else {
+			text := fmt.Sprintf("⌬ <b><u>%s :</u></b>\n\n"+
+				"<b>No AutoRename template set.</b>\n\n"+
+				"<b>Usage:</b> <code>/ar [animeshrine.xyz] S0{season}E{episode} Dr. Stone {quality}.mkv</code>\n\n"+
+				"<b>Available tags:</b>\n"+
+				"  • <code>{title}</code> — parsed title\n"+
+				"  • <code>{season}</code> — season number\n"+
+				"  • <code>{episode}</code> — episode number\n"+
+				"  • <code>{quality}</code> — video quality (e.g. 1080p)\n"+
+				"  • <code>{codec}</code> — video codec\n"+
+				"  • <code>{audio}</code> — audio codec\n"+
+				"  • <code>{chapter}</code> — chapter number\n"+
+				"  • <code>{episode:+N}</code> — episode with offset\n\n"+
+				"<b>Clear:</b> <code>/ar off</code>",
+				telegram.ToSmallCaps("AutoRename Guide"))
+			_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, nil)
+		}
+		return
+	}
+
+	template := strings.TrimSpace(parts[1])
+
+	// --- Clear template ---
+	switch strings.ToLower(template) {
+	case "off", "clear", "reset", "del", "none":
+		u.RemnameAuto = ""
+		_ = ext.DB.SaveUser(u)
+		_, _ = m.sender.SendMessage(ctx, peer, "✓ <b>AutoRename template cleared!</b>", msg.MessageID, nil)
+		return
+
+	default:
+		u.RemnameAuto = template
+		u.Autorename = true
+		u.RenameMethod = "auto"
+		_ = ext.DB.SaveUser(u)
+		text := fmt.Sprintf("✓ <b>AutoRename template saved!</b>\n\n<code>%s</code>", telegram.EscapeHTML(template))
+		_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, nil)
+		return
+	}
+}
+

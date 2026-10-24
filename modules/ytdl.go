@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -89,10 +90,6 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 }
 
 func (m *YtdlModule) sendDownloadError(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, notifyID int, errStr string, mode string, startTime time.Time) {
-	if m.statusMod != nil {
-		m.statusMod.RemoveStatusMessage(msg.ChatID)
-	}
-
 	tag := fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", msg.UserID, telegram.EscapeHTML(msg.SenderName))
 	if msg.Username != "" {
 		tag = "@" + msg.Username
@@ -108,9 +105,16 @@ func (m *YtdlModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCla
 		tag, telegram.EscapeHTML(errStr), mode, elapsed)
 
 	if notifyID > 0 {
-		_ = m.sender.EditMessage(ctx, peer, notifyID, errMsg, nil)
-	} else {
-		_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
+		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	}
+	_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
+
+	if m.statusMod != nil {
+		if m.taskMgr.Count() == 0 {
+			m.statusMod.DeleteAllMessages(ctx)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
+		}
 	}
 }
 
@@ -157,6 +161,17 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		uTask.SetProgress(curr, total, speed, eta)
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "cancel") {
+			m.taskMgr.RemoveTask(taskUID)
+			if m.statusMod != nil {
+				if m.taskMgr.Count() == 0 {
+					m.statusMod.DeleteAllMessages(ctx)
+				} else {
+					go m.statusMod.UpdateAllMessages(ctx, true)
+				}
+			}
+			return
+		}
 		m.sendDownloadError(ctx, peer, msg, notifyID, err.Error(), "#Leech | #YtDlp", taskStartTime)
 		return
 	}
@@ -299,10 +314,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	m.taskMgr.RemoveTask(taskUID)
 	if m.taskMgr.Count() == 0 {
 		if m.statusMod != nil {
-			m.statusMod.RemoveStatusMessage(msg.ChatID)
-		}
-		if notifyID > 0 {
-			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+			m.statusMod.DeleteAllMessages(ctx)
 		}
 	} else {
 		if m.statusMod != nil {

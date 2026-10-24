@@ -72,6 +72,7 @@ func (m *HelpModule) getHelpGuideText() string {
 		"┖ <code>/ytdl%s [link]</code> — Download video/audio via yt-dlp\n\n"+
 		"┎ <b>User Configuration:</b>\n"+
 		"┠ <code>/us%s</code> — User settings (Prefix, Suffix, Caption, AutoRename)\n"+
+		"┠ <code>/ar%s [template]</code> — Quick AutoRename template set/clear\n"+
 		"┠ <code>/setthumb%s</code> (reply) — Set custom leech thumbnail\n"+
 		"┖ <code>/status%s</code> — Live download & upload speed and progress\n\n"+
 		"┎ <b>Admin & Control:</b>\n"+
@@ -80,7 +81,7 @@ func (m *HelpModule) getHelpGuideText() string {
 		"┖ <code>/cancelall%s</code> — Cancel all your active tasks\n\n"+
 		"<i>Click Back below to return to start menu.</i>",
 		telegram.ToSmallCaps("AZML-Go Commands Guide"),
-		sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx)
+		sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx)
 }
 
 func (m *HelpModule) HandleStart(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {

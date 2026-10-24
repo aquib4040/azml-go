@@ -13,16 +13,18 @@ import (
 )
 
 type CancelModule struct {
-	sender  *telegram.MessageSender
-	taskMgr *ext.TaskManager
-	userMap *types.SafeUserMap
+	sender    *telegram.MessageSender
+	taskMgr   *ext.TaskManager
+	userMap   *types.SafeUserMap
+	statusMod *StatusModule
 }
 
-func NewCancelModule(sender *telegram.MessageSender, userMap *types.SafeUserMap) *CancelModule {
+func NewCancelModule(sender *telegram.MessageSender, userMap *types.SafeUserMap, statusMod *StatusModule) *CancelModule {
 	return &CancelModule{
-		sender:  sender,
-		taskMgr: ext.GetTaskManager(),
-		userMap: userMap,
+		sender:    sender,
+		taskMgr:   ext.GetTaskManager(),
+		userMap:   userMap,
+		statusMod: statusMod,
 	}
 }
 
@@ -82,6 +84,13 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 	_ = task.Cancel()
 	m.taskMgr.RemoveTask(gid)
 	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
+	if m.statusMod != nil {
+		if m.taskMgr.Count() == 0 {
+			m.statusMod.DeleteAllMessages(ctx)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
+		}
+	}
 }
 
 func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -129,4 +138,11 @@ func (m *CancelModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 	count := m.taskMgr.CancelAll(action)
 	_ = m.sender.EditMessage(ctx, peer, msgID, fmt.Sprintf("Cancelled <code>%d</code> task(s) matching '%s'", count, action), nil)
 	_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Cancelled %d tasks", count), false)
+	if m.statusMod != nil {
+		if m.taskMgr.Count() == 0 {
+			m.statusMod.DeleteAllMessages(ctx)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
+		}
+	}
 }

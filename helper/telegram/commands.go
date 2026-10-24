@@ -34,6 +34,7 @@ type Commands struct {
 	Broadcast   []string
 	Imdb        []string
 	Anime       []string
+	AutoRename  []string
 }
 
 var BotCommands Commands
@@ -174,6 +175,10 @@ func InitCommands() {
 			"anilist" + suffix,
 			"al" + suffix,
 		},
+		AutoRename: []string{
+			"autorename" + suffix,
+			"ar" + suffix,
+		},
 	}
 }
 
@@ -257,7 +262,7 @@ func (c *Commands) IsAnyCommand(text string, botUsername ...string) bool {
 		c.Authorize, c.UnAuthorize, c.AddSudo, c.RmSudo, c.AddPremium,
 		c.RmPremium, c.Premium, c.Blacklist, c.RmBlacklist, c.Ping,
 		c.Stats, c.Restart, c.Help, c.Log, c.UserSetting, c.BotSetting,
-		c.Speedtest, c.MediaInfo, c.Broadcast, c.Imdb, c.Anime,
+		c.Speedtest, c.MediaInfo, c.Broadcast, c.Imdb, c.Anime, c.AutoRename,
 	}
 
 	for _, list := range allLists {

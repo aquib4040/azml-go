@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,7 +36,15 @@ func (d *DirectDownloader) Download(ctx context.Context, link, outPath string, o
 	// Primary: Use Aria2c with 16 connections
 	aria := GetAria2Client()
 	dir, filename := filepath.Split(outPath)
-	if gid, err := aria.AddURI(link, dir, filename, nil); err == nil {
+	ariaLink := link
+	if strings.HasPrefix(ariaLink, "http://") || strings.HasPrefix(ariaLink, "https://") {
+		if strings.Contains(ariaLink, "#") {
+			ariaLink += "_" + ext.RandomHex(3)
+		} else {
+			ariaLink += "#" + ext.RandomHex(3)
+		}
+	}
+	if gid, err := aria.AddURI(ariaLink, dir, filename, nil); err == nil {
 		task := NewAria2DownloadTask(gid, filename, dir, 0, 0, 0)
 		_, pollErr := task.PollUntilComplete(ctx, func(c, t int64) {
 			if onProgress != nil {

@@ -514,12 +514,22 @@ func (t *Aria2DownloadTask) PollUntilComplete(ctx context.Context, onProgress fu
 				}
 				path := t.downloadPath
 				t.mu.Unlock()
-				// Immediately sever all peer connections & remove torrent to prevent any seeding
-				_ = t.client.Cancel(t.gid)
+				// Only sever peer connections & remove torrent to prevent background seeding for BitTorrent
+				if res.Bittorrent != nil {
+					_ = t.client.Cancel(t.gid)
+				}
 				return path, nil
 			case "error":
 				return "", fmt.Errorf("aria2 download failed: %s", res.ErrorMessage)
 			case "removed":
+				t.mu.RLock()
+				path := t.downloadPath
+				t.mu.RUnlock()
+				if path != "" {
+					if fi, sErr := os.Stat(path); sErr == nil && fi.Size() > 0 {
+						return path, nil
+					}
+				}
 				return "", errors.New("download cancelled or removed from aria2")
 			}
 		}

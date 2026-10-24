@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"azml-go/types"
@@ -21,54 +24,124 @@ var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
+type ShortenerEntry struct {
+	Domain string
+	APIKey string
+}
+
+var (
+	shortenersList   []ShortenerEntry
+	shortenersLock   sync.RWMutex
+	shortenersLoaded bool
+)
+
+// LoadShorteners parses shorteners.txt if it exists
+func LoadShorteners() {
+	shortenersLock.Lock()
+	defer shortenersLock.Unlock()
+	shortenersList = nil
+	shortenersLoaded = true
+
+	data, err := os.ReadFile("shorteners.txt")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, l := range lines {
+		parts := strings.Fields(strings.TrimSpace(l))
+		if len(parts) >= 2 {
+			shortenersList = append(shortenersList, ShortenerEntry{
+				Domain: parts[0],
+				APIKey: parts[1],
+			})
+		}
+	}
+}
+
+// GetShorteners returns a snapshot of active shorteners from shorteners.txt
+func GetShorteners() []ShortenerEntry {
+	shortenersLock.Lock()
+	if !shortenersLoaded {
+		shortenersLock.Unlock()
+		LoadShorteners()
+		shortenersLock.RLock()
+		defer shortenersLock.RUnlock()
+	} else {
+		shortenersLock.Unlock()
+		shortenersLock.RLock()
+		defer shortenersLock.RUnlock()
+	}
+	res := make([]ShortenerEntry, len(shortenersList))
+	copy(res, shortenersList)
+	return res
+}
+
 func ShortURL(longURL string) string {
 	cfg := config.Get()
-	if !cfg.ShortenerEnabled || cfg.Shortener == "" || cfg.ShortenerAPI == "" {
+	if !cfg.ShortenerEnabled {
 		return longURL
 	}
 
-	domain := strings.TrimPrefix(cfg.Shortener, "https://")
-	domain = strings.TrimPrefix(domain, "http://")
-	domain = strings.TrimSuffix(domain, "/")
+	shorteners := GetShorteners()
+	var domain, apiKey string
+	if len(shorteners) > 0 {
+		idx := rand.Intn(len(shorteners))
+		domain = shorteners[idx].Domain
+		apiKey = shorteners[idx].APIKey
+	} else if cfg.Shortener != "" && cfg.ShortenerAPI != "" {
+		domain = cfg.Shortener
+		apiKey = cfg.ShortenerAPI
+	} else {
+		return longURL
+	}
 
 	var apiURL string
-	switch {
-	case strings.Contains(domain, "ouo.io"):
-		apiURL = fmt.Sprintf("http://ouo.io/api/%s?s=%s", cfg.ShortenerAPI, url.QueryEscape(longURL))
-		resp, err := httpClient.Get(apiURL)
-		if err == nil {
-			defer resp.Body.Close()
-			b, _ := io.ReadAll(resp.Body)
-			res := strings.TrimSpace(string(b))
-			if res != "" && strings.HasPrefix(res, "http") {
-				return res
+	if strings.Contains(domain, "%s") {
+		if strings.Count(domain, "%s") >= 2 {
+			apiURL = fmt.Sprintf(domain, apiKey, url.QueryEscape(longURL))
+		} else {
+			apiURL = fmt.Sprintf(domain, url.QueryEscape(longURL))
+		}
+	} else if strings.Contains(domain, "{api}") || strings.Contains(domain, "{url}") {
+		apiURL = strings.ReplaceAll(domain, "{api}", apiKey)
+		apiURL = strings.ReplaceAll(apiURL, "{url}", url.QueryEscape(longURL))
+	} else {
+		cleanDomain := strings.TrimPrefix(domain, "https://")
+		cleanDomain = strings.TrimPrefix(cleanDomain, "http://")
+		cleanDomain = strings.TrimSuffix(cleanDomain, "/")
+
+		switch {
+		case strings.Contains(cleanDomain, "ouo.io"):
+			apiURL = fmt.Sprintf("http://ouo.io/api/%s?s=%s", apiKey, url.QueryEscape(longURL))
+		case strings.Contains(cleanDomain, "cutt.ly"):
+			apiURL = fmt.Sprintf("https://cutt.ly/api/api.php?key=%s&short=%s", apiKey, url.QueryEscape(longURL))
+		default:
+			apiURL = fmt.Sprintf("https://%s/api?api=%s&url=%s", cleanDomain, apiKey, url.QueryEscape(longURL))
+		}
+	}
+
+	resp, err := httpClient.Get(apiURL)
+	if err == nil {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+
+		var data map[string]interface{}
+		if json.Unmarshal(b, &data) == nil {
+			for _, k := range []string{"shortenedUrl", "shorturl", "url", "short", "link"} {
+				if val, ok := data[k].(string); ok && val != "" && strings.HasPrefix(val, "http") {
+					return val
+				}
+			}
+			if urlObj, ok := data["url"].(map[string]interface{}); ok {
+				if sl, ok := urlObj["shortLink"].(string); ok && sl != "" {
+					return sl
+				}
 			}
 		}
-	case strings.Contains(domain, "cutt.ly"):
-		apiURL = fmt.Sprintf("https://cutt.ly/api/api.php?key=%s&short=%s", cfg.ShortenerAPI, url.QueryEscape(longURL))
-		resp, err := httpClient.Get(apiURL)
-		if err == nil {
-			defer resp.Body.Close()
-			var data struct {
-				URL struct {
-					ShortLink string `json:"shortLink"`
-				} `json:"url"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&data) == nil && data.URL.ShortLink != "" {
-				return data.URL.ShortLink
-			}
-		}
-	default:
-		apiURL = fmt.Sprintf("https://%s/api?api=%s&url=%s", domain, cfg.ShortenerAPI, url.QueryEscape(longURL))
-		resp, err := httpClient.Get(apiURL)
-		if err == nil {
-			defer resp.Body.Close()
-			var data struct {
-				ShortenedURL string `json:"shortenedUrl"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&data) == nil && data.ShortenedURL != "" {
-				return data.ShortenedURL
-			}
+
+		res := strings.TrimSpace(string(b))
+		if res != "" && (strings.HasPrefix(res, "http://") || strings.HasPrefix(res, "https://")) {
+			return res
 		}
 	}
 
@@ -114,7 +187,7 @@ func CheckingAccess(userID int64, isGroup bool, botUsername string, userCache *t
 	}
 
 	rawPayload := fmt.Sprintf("%s&&%d", token, userID)
-	encodedPayload := base64.StdEncoding.EncodeToString([]byte(rawPayload))
+	encodedPayload := base64.RawURLEncoding.EncodeToString([]byte(rawPayload))
 	botStartURL := fmt.Sprintf("https://t.me/%s?start=%s", botUsername, encodedPayload)
 	shortenedURL := ShortURL(botStartURL)
 
@@ -124,7 +197,10 @@ func CheckingAccess(userID int64, isGroup bool, botUsername string, userCache *t
 }
 
 func VerifyToken(tokenPayload string, senderID int64, userCache *types.SafeUserMap) (bool, string) {
-	raw, err := base64.StdEncoding.DecodeString(tokenPayload)
+	raw, err := base64.RawURLEncoding.DecodeString(tokenPayload)
+	if err != nil {
+		raw, err = base64.StdEncoding.DecodeString(tokenPayload)
+	}
 	if err != nil {
 		return false, "Invalid Token Payload!"
 	}
