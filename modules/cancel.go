@@ -34,7 +34,7 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 
 	if ext.IsPendingThumbSession(msg.UserID) {
 		ext.ClearPendingThumbSession(msg.UserID)
-		_, _ = m.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail upload cancelled.</b>", msg.MessageID, nil)
+		_, _ = m.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail upload cancelled.</b>", msg.MessageID, nil)
 		return
 	}
 
@@ -81,7 +81,7 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 
 	_ = task.Cancel()
 	m.taskMgr.RemoveTask(gid)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
 }
 
 func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -97,12 +97,12 @@ func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerCla
 	}
 
 	btn := telegram.NewButtonMaker()
-	btn.IButtonStyled("📥 "+telegram.ToSmallCaps("Downloading"), "canall downloading", "primary")
-	btn.IButtonStyled("📤 "+telegram.ToSmallCaps("Uploading"), "canall uploading", "primary")
-	btn.IButtonStyled("⏸️ "+telegram.ToSmallCaps("Paused"), "canall paused", "primary")
-	btn.IButtonStyled("⏳ "+telegram.ToSmallCaps("Queued Dl"), "canall queueddl", "primary")
-	btn.IButtonStyled("⌛ "+telegram.ToSmallCaps("Queued Up"), "canall queueup", "primary")
-	btn.IButtonStyled("⛔ "+telegram.ToSmallCaps("All Tasks"), "canall all", "danger")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Downloading"), "canall downloading", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Uploading"), "canall uploading", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Paused"), "canall paused", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Queued Dl"), "canall queueddl", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Queued Up"), "canall queueup", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("All Tasks"), "canall all", "danger")
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "canall close", "danger")
 
 	_, _ = m.sender.SendMessage(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn.BuildMenu(2))

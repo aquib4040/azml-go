@@ -54,8 +54,9 @@ type BotApp struct {
 	cancelHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelAllHandler func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelCbHandler  func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
-	settingsHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	settingsCbHandler func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
+	settingsHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	settingsCbHandler     func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
+	settingsUpdateHandler func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, u *types.UserSettings, key string)
 	bsettingHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	bsettingCbHandler     func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	bsettingInputHandler  func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int)
@@ -204,9 +205,14 @@ func (b *BotApp) SetCancelHandlers(h func(ctx context.Context, peer tg.InputPeer
 	b.cancelAllHandler = all
 	b.cancelCbHandler = cb
 }
-func (b *BotApp) SetSettingsHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)) {
+func (b *BotApp) SetSettingsHandlers(
+	h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext),
+	cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64),
+	update func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, u *types.UserSettings, key string),
+) {
 	b.settingsHandler = h
 	b.settingsCbHandler = cb
+	b.settingsUpdateHandler = update
 }
 func (b *BotApp) SetBotSettingsHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)) {
 	b.bsettingHandler = h
@@ -340,11 +346,16 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	if sess, ok := ext.GetPendingSettingSession(senderID, chatID); ok && sess != nil {
 		if text == "/cancel" {
 			ext.ClearPendingSettingSession(senderID)
-			_, _ = b.sender.SendMessage(ctx, peer, "🛑 <i>Setting change cancelled.</i>", m.ID, nil)
+			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			if sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
+				u := b.userMap.GetOrCreate(senderID)
+				b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, sess.Key)
+			}
 			return
 		}
 		if !strings.HasPrefix(text, "/") {
 			ext.ClearPendingSettingSession(senderID)
+			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
 			u := b.userMap.GetOrCreate(senderID)
 			b.applyUserSettingValue(ctx, peer, u, sess.Key, text, sess.PromptMsgID)
 			return
@@ -373,7 +384,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 
 	if ext.IsPendingThumbSession(senderID, chatID) && text == "/cancel" {
 		ext.ClearPendingThumbSession(senderID)
-		_, _ = b.sender.SendMessage(ctx, peer, "🛑 <i>Custom thumbnail upload cancelled.</i>", m.ID, nil)
+		_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
 		return
 	}
 
@@ -449,7 +460,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	// 5. Authorization check for leech, admin, settings, and task commands
 	if !telegram.IsAuthorized(chatID, senderID, b.userMap) {
 		log.Printf("[AZML-Go] Unauthorized command %q by user %d in chat %d", text, senderID, chatID)
-		sentID, _ := b.sender.SendMessage(ctx, peer, "⚠️ <b>Access Denied!</b>\nYou are not authorized to use this bot.\nContact the bot owner to get authorization.", m.ID, nil)
+		sentID, _ := b.sender.SendMessage(ctx, peer, "⌬ <b>Access Denied!</b>\nYou are not authorized to use this bot.\nContact the bot owner to get authorization.", m.ID, nil)
 		if sentID > 0 {
 			switch m.PeerID.(type) {
 			case *tg.PeerChat, *tg.PeerChannel:
@@ -475,7 +486,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				botUser = telegram.CurrentBotUsername
 			}
 			btn := telegram.NewButtonMaker()
-			btn.UButtonStyled("🚀 "+telegram.ToSmallCaps("Start Bot in PM"), fmt.Sprintf("https://t.me/%s?start=start", botUser), "primary")
+			btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Start Bot in PM"), fmt.Sprintf("https://t.me/%s?start=start", botUser), "primary")
 			sentID, err := b.sender.SendMessage(ctx, peer, "<i>You didn't START the bot in PM (Private)</i>", m.ID, btn.BuildMenu(1))
 			if err == nil && sentID > 0 {
 				b.sender.AutoDeleteMessage(peer, sentID, 20)
@@ -1030,7 +1041,7 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 				}
 				_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, "token.pickle")
 				if err != nil {
-					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ Error downloading <b>token.pickle</b>: %v", err), m.ID, nil)
+					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("× Error downloading <b>token.pickle</b>: %v", err), m.ID, nil)
 					return true
 				}
 				// Reload Google Drive OAuth credentials immediately
@@ -1038,7 +1049,7 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 				if gClient != nil {
 					_ = gClient.LoadCredentials("token.pickle")
 				}
-				_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>token.pickle</b> received and saved! Google Drive OAuth credentials successfully reloaded.", m.ID, nil)
+				_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>token.pickle</b> received and saved! Google Drive OAuth credentials successfully reloaded.", m.ID, nil)
 				return true
 
 			case "config.env":
@@ -1053,11 +1064,11 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 				}
 				_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, "config.env")
 				if err != nil {
-					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ Error downloading <b>config.env</b>: %v", err), m.ID, nil)
+					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("× Error downloading <b>config.env</b>: %v", err), m.ID, nil)
 					return true
 				}
 				_, _ = config.LoadConfig("config.env")
-				_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>config.env</b> received and saved! Configurations reloaded.", m.ID, nil)
+				_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>config.env</b> received and saved! Configurations reloaded.", m.ID, nil)
 				return true
 
 			case "cookies.txt":
@@ -1072,10 +1083,10 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 				}
 				_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, "cookies.txt")
 				if err != nil {
-					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ Error downloading <b>cookies.txt</b>: %v", err), m.ID, nil)
+					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("× Error downloading <b>cookies.txt</b>: %v", err), m.ID, nil)
 					return true
 				}
-				_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>cookies.txt</b> received and saved for yt-dlp & aria2c!", m.ID, nil)
+				_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>cookies.txt</b> received and saved for yt-dlp & aria2c!", m.ID, nil)
 				return true
 
 			case "accounts.zip":
@@ -1090,10 +1101,10 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 				}
 				_, err := dl.Download(b.rawAPI, loc).ToPath(ctx, "accounts.zip")
 				if err != nil {
-					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ Error downloading <b>accounts.zip</b>: %v", err), m.ID, nil)
+					_, _ = b.sender.SendMessage(ctx, peer, fmt.Sprintf("× Error downloading <b>accounts.zip</b>: %v", err), m.ID, nil)
 					return true
 				}
-				_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>accounts.zip</b> received and saved successfully!", m.ID, nil)
+				_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>accounts.zip</b> received and saved successfully!", m.ID, nil)
 				return true
 			}
 
@@ -1114,7 +1125,7 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 							u := b.userMap.GetOrCreate(senderID)
 							u.CustomThumb = destThumb
 							_ = ext.DB.SaveUser(u)
-							_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
 							return true
 						}
 					}
@@ -1174,7 +1185,7 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 						u := b.userMap.GetOrCreate(senderID)
 						u.CustomThumb = destThumb
 						_ = ext.DB.SaveUser(u)
-						_, _ = b.sender.SendMessage(ctx, peer, "✅ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+						_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
 						return true
 					}
 				}
@@ -1277,7 +1288,11 @@ func (b *BotApp) applyUserSettingValue(ctx context.Context, peer tg.InputPeerCla
 	}
 
 	_ = ext.DB.SaveUser(u)
-	confirmText := fmt.Sprintf("✅ <b>%s</b> updated to: <code>%s</code>", fieldName, val)
-	_, _ = b.sender.SendMessage(ctx, peer, confirmText, 0, nil)
+	if promptMsgID > 0 && b.settingsUpdateHandler != nil {
+		b.settingsUpdateHandler(ctx, peer, promptMsgID, u, key)
+	} else {
+		confirmText := fmt.Sprintf("✓ <b>%s</b> updated to: <code>%s</code>", fieldName, val)
+		_, _ = b.sender.SendMessage(ctx, peer, confirmText, 0, nil)
+	}
 }
 

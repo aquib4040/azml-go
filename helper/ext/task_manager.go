@@ -149,7 +149,7 @@ func (m *TaskManager) BuildStatusMessage(page int) (string, *telegram.ButtonMake
 			telegram.ToSmallCaps("Disk Free"), mem.OSFree,
 			telegram.ToSmallCaps("Uptime"), uptime)
 		btn := telegram.NewButtonMaker()
-		btn.IButtonStyled("🔄 "+telegram.ToSmallCaps("Refresh"), "status ref 1", "primary")
+		btn.IButtonStyled("⌬ "+telegram.ToSmallCaps("Refresh"), "status ref 1", "primary")
 		btn.Row()
 		return noTaskMsg, btn
 	}
@@ -235,11 +235,11 @@ func (m *TaskManager) BuildStatusMessage(page int) (string, *telegram.ButtonMake
 		}
 
 		btn.IButtonStyled("⫷", fmt.Sprintf("status page %d", prevPage), "primary")
-		btn.IButtonStyled(fmt.Sprintf("🔄 %s %d/%d", telegram.ToSmallCaps("Pages"), page, totalPages), fmt.Sprintf("status ref %d", page), "primary")
+		btn.IButtonStyled(fmt.Sprintf("⌬ %s %d/%d", telegram.ToSmallCaps("Pages"), page, totalPages), fmt.Sprintf("status ref %d", page), "primary")
 		btn.IButtonStyled("⫸", fmt.Sprintf("status page %d", nextPage), "primary")
 		btn.Row()
 	} else {
-		btn.IButtonStyled("🔄 "+telegram.ToSmallCaps("Refresh"), fmt.Sprintf("status ref %d", page), "primary")
+		btn.IButtonStyled("⌬ "+telegram.ToSmallCaps("Refresh"), fmt.Sprintf("status ref %d", page), "primary")
 		btn.Row()
 	}
 

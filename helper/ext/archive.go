@@ -187,13 +187,13 @@ func ForceExtractArchive(archivePath, targetDir, password string) (string, error
 	// 1. Zip Bomb & Safety Pre-check
 	uncompressedSize, count, isBomb, _ := InspectArchiveSafety(archivePath, password)
 	if isBomb {
-		return "", fmt.Errorf("⚠️ Zip Bomb Protection: archive has abnormal expansion ratio or excessive files (%d files, %s unpacked). Extraction blocked",
+		return "", fmt.Errorf("⌬ Zip Bomb Protection: archive has abnormal expansion ratio or excessive files (%d files, %s unpacked). Extraction blocked",
 			count, GetReadableFileSize(uncompressedSize))
 	}
 
 	// 2. Storage Threshold Pre-check
 	if uncompressedSize > 0 && !CheckStorageThreshold(uncompressedSize, true) {
-		return "", fmt.Errorf("⚠️ Insufficient storage: extracting requires %s which exceeds safe storage limits",
+		return "", fmt.Errorf("⌬ Insufficient storage: extracting requires %s which exceeds safe storage limits",
 			GetReadableFileSize(uncompressedSize))
 	}
 

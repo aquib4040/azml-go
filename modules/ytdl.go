@@ -206,7 +206,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		}
 	}()
 
-	dumpID := cfg.LeechLogID
+	var dumpID int64
 	if user != nil && user.DumpChatID != 0 {
 		dumpID = user.DumpChatID
 	}
@@ -292,15 +292,22 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		botUser = "Yukiileechrrbot"
 	}
 	finishBtn := telegram.NewButtonMaker()
-	finishBtn.UButtonStyled("📩 "+telegram.ToSmallCaps("View in Bot PM"), fmt.Sprintf("https://t.me/%s", botUser), "primary")
+	finishBtn.UButtonStyled("◈ "+telegram.ToSmallCaps("View in Bot PM"), fmt.Sprintf("https://t.me/%s", botUser), "primary")
 
 	_, _ = m.sender.SendMessageWithButtons(ctx, peer, sb.String(), msg.MessageID, finishBtn, 1)
 
-	if m.statusMod != nil {
-		m.statusMod.RemoveStatusMessage(msg.ChatID)
-	}
-	if notifyID > 0 {
-		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	m.taskMgr.RemoveTask(taskUID)
+	if m.taskMgr.Count() == 0 {
+		if m.statusMod != nil {
+			m.statusMod.RemoveStatusMessage(msg.ChatID)
+		}
+		if notifyID > 0 {
+			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		}
+	} else {
+		if m.statusMod != nil {
+			go m.statusMod.UpdateAllMessages(context.Background(), true)
+		}
 	}
 }
 

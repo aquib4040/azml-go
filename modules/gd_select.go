@@ -49,8 +49,8 @@ func BuildGDriveSelectionButtons(uid string) tg.ReplyMarkupClass {
 	}
 
 	b := telegram.NewButtonMaker()
-	b.UButtonStyled("📁 "+telegram.ToSmallCaps("Select Files"), fmt.Sprintf("%s/app/files/%s", baseURL, uid), "primary")
-	b.IButtonStyled("🔢 "+telegram.ToSmallCaps("Pincode"), fmt.Sprintf("gdsel pin %s %s", uid, pinCode), "primary")
+	b.UButtonStyled("◈ "+telegram.ToSmallCaps("Select Files"), fmt.Sprintf("%s/app/files/%s", baseURL, uid), "primary")
+	b.IButtonStyled("◈ "+telegram.ToSmallCaps("Pincode"), fmt.Sprintf("gdsel pin %s %s", uid, pinCode), "primary")
 	b.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), fmt.Sprintf("gdsel cancel %s", uid), "danger")
 	b.IButtonStyled("✓ "+telegram.ToSmallCaps("Done Selecting"), fmt.Sprintf("gdsel done %s", uid), "success")
 	return b.BuildMenu(2)
@@ -89,13 +89,13 @@ func HandleGDriveSelectCallback(ctx context.Context, rawAPI *tg.Client, sender *
 
 	cache := GetGDriveSelectCache(uid)
 	if cache == nil {
-		_ = sender.AnswerCallback(ctx, queryID, "⚠️ Session expired or download already started!", true)
+		_ = sender.AnswerCallback(ctx, queryID, "⌬ Session expired or download already started!", true)
 		_ = sender.DeleteMessage(ctx, peer, []int{msgID})
 		return
 	}
 
 	if fromUID != 0 && fromUID != cache.UserID {
-		_ = sender.AnswerCallback(ctx, queryID, "❌ This selection is not for you!", true)
+		_ = sender.AnswerCallback(ctx, queryID, "× This selection is not for you!", true)
 		return
 	}
 
@@ -105,7 +105,7 @@ func HandleGDriveSelectCallback(ctx context.Context, rawAPI *tg.Client, sender *
 		if len(parts) > 3 {
 			pincode = parts[3]
 		}
-		_ = sender.AnswerCallback(ctx, queryID, fmt.Sprintf("🔑 PIN: %s", pincode), true)
+		_ = sender.AnswerCallback(ctx, queryID, fmt.Sprintf("⌬ PIN: %s", pincode), true)
 
 	case "done":
 		selectedIDs := web.GDriveStore.ReadSelection(uid)
@@ -118,7 +118,7 @@ func HandleGDriveSelectCallback(ctx context.Context, rawAPI *tg.Client, sender *
 		}
 
 		if len(selected) == 0 {
-			_ = sender.AnswerCallback(ctx, queryID, "⚠️ Select at least one file first!", true)
+			_ = sender.AnswerCallback(ctx, queryID, "⌬ Select at least one file first!", true)
 			return
 		}
 
@@ -127,7 +127,7 @@ func HandleGDriveSelectCallback(ctx context.Context, rawAPI *tg.Client, sender *
 			totalSize += f.Size
 		}
 
-		_ = sender.AnswerCallback(ctx, queryID, fmt.Sprintf("🚀 Starting download of %d file(s) (%s)!", len(selected), ext.GetReadableFileSize(totalSize)), false)
+		_ = sender.AnswerCallback(ctx, queryID, fmt.Sprintf("⌬ Starting download of %d file(s) (%s)!", len(selected), ext.GetReadableFileSize(totalSize)), false)
 		_ = sender.DeleteMessage(ctx, peer, []int{msgID})
 
 		select {
@@ -137,7 +137,7 @@ func HandleGDriveSelectCallback(ctx context.Context, rawAPI *tg.Client, sender *
 
 	case "cancel":
 		cache.IsCancelled = true
-		_ = sender.AnswerCallback(ctx, queryID, "❌ Download cancelled!", false)
+		_ = sender.AnswerCallback(ctx, queryID, "× Download cancelled!", false)
 		_ = sender.DeleteMessage(ctx, peer, []int{msgID})
 		select {
 		case cache.DoneChan <- false:

@@ -85,7 +85,7 @@ func main() {
 	app.SetYtdlHandler(ytdlMod.HandleYtdl)
 	app.SetStatusHandlers(statusMod.HandleStatus, statusMod.HandleCallback)
 	app.SetCancelHandlers(cancelMod.HandleCancel, cancelMod.HandleCancelAll, cancelMod.HandleCallback)
-	app.SetSettingsHandlers(settingsMod.HandleSettings, settingsMod.HandleCallback)
+	app.SetSettingsHandlers(settingsMod.HandleSettings, settingsMod.HandleCallback, settingsMod.HandleSettingUpdated)
 	app.SetBotSettingsHandlers(botSetMod.HandleBotSettings, botSetMod.HandleCallback)
 	app.SetBotSettingsInputHandlers(botSetMod.HandleSessionValue, botSetMod.HandleSessionCancelled)
 	app.SetAuthorizeHandlers(

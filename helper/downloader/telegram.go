@@ -30,13 +30,7 @@ func NewTelegramDownloader(rawClient *tg.Client) *TelegramDownloader {
 
 func (t *TelegramDownloader) DownloadDocument(ctx context.Context, loc tg.InputDocumentFileLocation, outPath string, onProgress func(cur, total int64)) error {
 	_ = os.MkdirAll(filepath.Dir(outPath), 0755)
-	file, err := os.Create(outPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = t.dl.Download(t.rawClient, &loc).ToPath(ctx, outPath)
+	_, err := t.dl.Download(t.rawClient, &loc).WithThreads(8).ToPath(ctx, outPath)
 	return err
 }
 

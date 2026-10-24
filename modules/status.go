@@ -199,7 +199,7 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 			if task != nil {
 				_ = task.Cancel()
 				m.taskMgr.RemoveTask(gid)
-				_ = m.sender.AnswerCallback(ctx, queryID, "🛑 Task Cancelled!", false)
+				_ = m.sender.AnswerCallback(ctx, queryID, "× Task Cancelled!", false)
 				go m.UpdateAllMessages(context.Background(), true)
 				return
 			}

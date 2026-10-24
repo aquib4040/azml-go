@@ -118,7 +118,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 			}
 		}
 
-		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("📦 <b>Bulk Leech Initiated:</b> <code>%d links</code>", len(bulkLinks)), msg.MessageID, nil)
+		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("⌬ <b>Bulk Leech Initiated:</b> <code>%d links</code>", len(bulkLinks)), msg.MessageID, nil)
 
 		go func() {
 			for _, bLink := range bulkLinks {
@@ -462,7 +462,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 							}
 						}()
 
-						_, err := dl.Download(m.rawAPI, loc).ToPath(ctx, destPath)
+						_, err := dl.Download(m.rawAPI, loc).WithThreads(8).ToPath(ctx, destPath)
 						close(stopProgress)
 
 						if err == nil {
@@ -731,7 +731,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 						baseURL = fmt.Sprintf("http://localhost:%d", cfg.BaseURLPort)
 					}
 					b := telegram.NewButtonMaker()
-					b.UButtonStyled("📁 "+telegram.ToSmallCaps("Select Files"), fmt.Sprintf("%s/app/files/%s", strings.TrimSuffix(baseURL, "/"), gid), "primary")
+					b.UButtonStyled("◈ "+telegram.ToSmallCaps("Select Files"), fmt.Sprintf("%s/app/files/%s", strings.TrimSuffix(baseURL, "/"), gid), "primary")
 					_ = m.sender.EditMessage(ctx, peer, notifyID, "Your torrent download paused. Choose files from selection web link then press Confirm on web page.", b.BuildMenu(1))
 				}
 
@@ -808,7 +808,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				downloadedPath = outDir
 			} else {
 				log.Printf("[LEECH -e] Extraction error: %v, continuing with original file", err)
-				_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("⚠️ <b>Extraction Warning:</b> %v\nUploading original archive.", err), nil)
+				_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("⌬ <b>Extraction Warning:</b> %v\nUploading original archive.", err), nil)
 			}
 		} else if fi, err := os.Stat(downloadedPath); err == nil && fi.IsDir() {
 			_ = filepath.Walk(downloadedPath, func(p string, info os.FileInfo, err error) error {
@@ -878,7 +878,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 
 	if len(filesToUpload) == 0 {
-		_ = m.sender.EditMessage(ctx, peer, notifyID, "❌ <b>Download Failed:</b> No payload files found", nil)
+		_ = m.sender.EditMessage(ctx, peer, notifyID, "× <b>Download Failed:</b> No payload files found", nil)
 		return
 	}
 
@@ -892,7 +892,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	queuedUP, qUpErr := ext.AcquireUploadQueue(ctx, taskUID, displayName, totalUploadSize, msg.ChatID, msg.UserID, notifyID, cancel)
 	if qUpErr != nil {
-		_ = m.sender.EditMessage(ctx, peer, notifyID, "❌ <i>Upload task cancelled while in queue</i>", nil)
+		_ = m.sender.EditMessage(ctx, peer, notifyID, "× <i>Upload task cancelled while in queue</i>", nil)
 		return
 	}
 	defer ext.ReleaseUpload(taskUID)
@@ -916,7 +916,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		go m.statusMod.UpdateAllMessages(context.Background(), true)
 	}
 
-	dumpID := cfg.LeechLogID
+	var dumpID int64
 	if opt.UserDump != 0 {
 		dumpID = opt.UserDump
 	} else if user != nil && user.DumpChatID != 0 {
@@ -1008,7 +1008,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				partCaption = fmt.Sprintf("<b>Part %d/%d</b>\n%s", idx+1, len(splitParts), caption)
 			}
 			if len(ssLinks) > 0 {
-				partCaption += fmt.Sprintf("\n\n📸 <a href=\"%s\">Screenshots</a>", ssLinks[0])
+				partCaption += fmt.Sprintf("\n\n◈ <a href=\"%s\">Screenshots</a>", ssLinks[0])
 			}
 
 			botPM := cfg.BotPM
@@ -1113,16 +1113,23 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		botUser = "Yukiileechrrbot"
 	}
 	finishBtn := telegram.NewButtonMaker()
-	finishBtn.UButtonStyled("📩 "+telegram.ToSmallCaps("View in Bot PM"), fmt.Sprintf("https://t.me/%s", botUser), "primary")
+	finishBtn.UButtonStyled("◈ "+telegram.ToSmallCaps("View in Bot PM"), fmt.Sprintf("https://t.me/%s", botUser), "primary")
 
-	// Send completion message into the group / chat where leech was initiated
+	// Send completion message into the group / chat where leech was initiated, replying to user's command
 	_, _ = m.sender.SendMessageWithButtons(ctx, peer, sb.String(), msg.MessageID, finishBtn, 1)
 
-	if m.statusMod != nil {
-		m.statusMod.RemoveStatusMessage(msg.ChatID)
-	}
-	if notifyID > 0 {
-		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+	m.taskMgr.RemoveTask(taskUID)
+	if m.taskMgr.Count() == 0 {
+		if m.statusMod != nil {
+			m.statusMod.RemoveStatusMessage(msg.ChatID)
+		}
+		if notifyID > 0 {
+			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		}
+	} else {
+		if m.statusMod != nil {
+			go m.statusMod.UpdateAllMessages(context.Background(), true)
+		}
 	}
 }
 

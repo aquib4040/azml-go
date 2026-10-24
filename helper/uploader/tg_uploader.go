@@ -256,9 +256,14 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 		fromChatID := telegram.PeerToChatID(peer)
 
+		// Track chats already delivered to avoid ANY duplicate sends (e.g. if LeechLogID == fromChatID or DumpChatID)
+		sentChats := make(map[int64]bool)
+		sentChats[fromChatID] = true
+
 		// 1. Copy to Dump chat if configured (clean copy via Bot API copyMessage, like Python AZML)
-		if opt.DumpChatID != 0 {
+		if opt.DumpChatID != 0 && !sentChats[opt.DumpChatID] {
 			dumpChatID := opt.DumpChatID
+			sentChats[dumpChatID] = true
 			if !copyMessageViaBotAPI(botToken, dumpChatID, fromChatID, msgID) {
 				chID := getChannelID(dumpChatID)
 				dumpPeer := &tg.InputPeerChannel{
@@ -279,8 +284,9 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 
 		// 2. Copy to Leech Log channel if configured (without forward tag)
-		if opt.LogChatID != 0 {
+		if opt.LogChatID != 0 && !sentChats[opt.LogChatID] {
 			logChatID := opt.LogChatID
+			sentChats[logChatID] = true
 			if !copyMessageViaBotAPI(botToken, logChatID, fromChatID, msgID) {
 				chID := getChannelID(logChatID)
 				logPeer := &tg.InputPeerChannel{
@@ -301,7 +307,8 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 
 		// 3. Copy to User PM if BotPM is enabled (AZML route: copy_message = NO forward tag!)
-		if opt.BotPM && opt.UserID != 0 {
+		if opt.BotPM && opt.UserID != 0 && !sentChats[opt.UserID] {
+			sentChats[opt.UserID] = true
 			if !copyMessageViaBotAPI(botToken, opt.UserID, fromChatID, msgID) {
 				userPeer := &tg.InputPeerUser{
 					UserID: opt.UserID,

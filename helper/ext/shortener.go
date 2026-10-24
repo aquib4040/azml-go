@@ -108,7 +108,7 @@ func CheckingAccess(userID int64, isGroup bool, botUsername string, userCache *t
 	validityStr := GetReadableTime(cfg.TokenTimeout)
 
 	if cfg.TokenInPM && isGroup {
-		btn.UButtonStyled("🔑 "+telegram.ToSmallCaps("Get Token in PM"), fmt.Sprintf("https://t.me/%s?start=req_%d", botUsername, userID), "primary")
+		btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Get Token in PM"), fmt.Sprintf("https://t.me/%s?start=req_%d", botUsername, userID), "primary")
 		msg := fmt.Sprintf("<i>Temporary Token has expired.</i> Click below to get token generation link in PM.\n<b>Validity:</b> <code>%s</code>", validityStr)
 		return msg, btn
 	}
@@ -118,7 +118,7 @@ func CheckingAccess(userID int64, isGroup bool, botUsername string, userCache *t
 	botStartURL := fmt.Sprintf("https://t.me/%s?start=%s", botUsername, encodedPayload)
 	shortenedURL := ShortURL(botStartURL)
 
-	btn.UButtonStyled("🔑 "+telegram.ToSmallCaps("Generate New Token"), shortenedURL, "success")
+	btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Generate New Token"), shortenedURL, "success")
 	msg := fmt.Sprintf("<i>Temporary Token has expired.</i> Kindly generate a new token to use the bot.\n<b>Validity:</b> <code>%s</code>", validityStr)
 	return msg, btn
 }
@@ -141,6 +141,6 @@ func VerifyToken(tokenPayload string, senderID int64, userCache *types.SafeUserM
 	u.TokenTime = time.Now().Unix()
 	_ = DB.SaveUser(u)
 	cfg := config.Get()
-	return true, fmt.Sprintf("🎉 <b>Token Verified Successfully!</b>\n<b>Validity:</b> <code>%s</code>", GetReadableTime(cfg.TokenTimeout))
+	return true, fmt.Sprintf("✓ <b>Token Verified Successfully!</b>\n<b>Validity:</b> <code>%s</code>", GetReadableTime(cfg.TokenTimeout))
 }
 

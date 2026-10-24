@@ -48,7 +48,7 @@ func (m *HelpModule) getStartText(name string) string {
 func (m *HelpModule) getStartButtons(ownerID int64) *telegram.ButtonMaker {
 	cfg := config.Get()
 	btn := telegram.NewButtonMaker()
-	btn.IButtonStyled("📖 "+telegram.ToSmallCaps("Help Guide"), "start_help", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Help Guide"), "start_help", "primary")
 
 	ownerUsername := strings.TrimPrefix(strings.TrimSpace(cfg.OwnerUsername), "@")
 	if ownerUsername == "" {
@@ -56,7 +56,7 @@ func (m *HelpModule) getStartButtons(ownerID int64) *telegram.ButtonMaker {
 	}
 	ownerURL := fmt.Sprintf("https://t.me/%s", ownerUsername)
 
-	btn.UButtonStyled("👑 "+telegram.ToSmallCaps("Owner"), ownerURL, "primary")
+	btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Owner"), ownerURL, "primary")
 	btn.Row()
 	return btn
 }
@@ -128,7 +128,7 @@ func (m *HelpModule) HandlePing(ctx context.Context, peer tg.InputPeerClass, msg
 	resID, err := m.sender.SendMessage(ctx, peer, "<i>Pinging...</i>", msg.MessageID, nil)
 	if err == nil && resID > 0 {
 		diff := time.Since(start).Milliseconds()
-		_ = m.sender.EditMessage(ctx, peer, resID, fmt.Sprintf("🏓 <b>Pong!</b> <code>%d ms</code>", diff), nil)
+		_ = m.sender.EditMessage(ctx, peer, resID, fmt.Sprintf("⌬ <b>Pong!</b> <code>%d ms</code>", diff), nil)
 	}
 }
 
@@ -137,10 +137,10 @@ func (m *HelpModule) getStatsView(key string, targetUID int64) (string, tg.Reply
 	var msg string
 
 	if key == "home" {
-		btn.IButtonStyled("🤖 "+telegram.ToSmallCaps("Bot Stats"), fmt.Sprintf("stats %d stbot", targetUID), "primary")
-		btn.IButtonStyled("🖥️ "+telegram.ToSmallCaps("OS Stats"), fmt.Sprintf("stats %d stsys", targetUID), "primary")
-		btn.IButtonStyled("📦 "+telegram.ToSmallCaps("Repo Stats"), fmt.Sprintf("stats %d strepo", targetUID), "primary")
-		btn.IButtonStyled("⚡ "+telegram.ToSmallCaps("Bot Limits"), fmt.Sprintf("stats %d botlimits", targetUID), "primary")
+		btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Bot Stats"), fmt.Sprintf("stats %d stbot", targetUID), "primary")
+		btn.IButtonStyled("◈ "+telegram.ToSmallCaps("OS Stats"), fmt.Sprintf("stats %d stsys", targetUID), "primary")
+		btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Repo Stats"), fmt.Sprintf("stats %d strepo", targetUID), "primary")
+		btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Bot Limits"), fmt.Sprintf("stats %d botlimits", targetUID), "primary")
 		btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), fmt.Sprintf("stats %d close", targetUID), "danger")
 		msg = "⌬ <b><i>Bot & OS Statistics!</i></b>"
 	} else {
@@ -239,7 +239,7 @@ func (m *HelpModule) HandleLog(ctx context.Context, peer tg.InputPeerClass, msg 
 		_, _ = m.sender.SendMessage(ctx, peer, "Only Owner/Sudo can view logs!", msg.MessageID, nil)
 		return
 	}
-	_, _ = m.sender.SendMessage(ctx, peer, "📋 <b>Logs:</b> All services operating normally.", msg.MessageID, nil)
+	_, _ = m.sender.SendMessage(ctx, peer, "⌬ <b>Logs:</b> All services operating normally.", msg.MessageID, nil)
 }
 
 func (m *HelpModule) HandleRestart(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -247,7 +247,7 @@ func (m *HelpModule) HandleRestart(ctx context.Context, peer tg.InputPeerClass, 
 		_, _ = m.sender.SendMessage(ctx, peer, "Only Owner can restart the bot!", msg.MessageID, nil)
 		return
 	}
-	msgID, _ := m.sender.SendMessage(ctx, peer, "🔄 <i>Restarting AZML-Go...</i>", msg.MessageID, nil)
+	msgID, _ := m.sender.SendMessage(ctx, peer, "• <i>Restarting AZML-Go...</i>", msg.MessageID, nil)
 	if msgID > 0 {
 		_ = os.WriteFile(".restartmsg", []byte(fmt.Sprintf("%d %d", msg.ChatID, msgID)), 0644)
 	}

@@ -136,16 +136,16 @@ func runMediaInfo(filePath string) string {
 
 func formatMediaInfoHTML(fileName, out string) string {
 	sections := map[string]string{
-		"General":  "🗒",
-		"Video":    "🎞",
-		"Audio":    "🔊",
-		"Text":     "🔠",
-		"Subtitle": "🔠",
-		"Menu":     "🗃",
+		"General":  "◈",
+		"Video":    "◈",
+		"Audio":    "◈",
+		"Text":     "◈",
+		"Subtitle": "◈",
+		"Menu":     "◈",
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<h4>📌 %s</h4><br>", fileName))
+	sb.WriteString(fmt.Sprintf("<h4>◈ %s</h4><br>", fileName))
 
 	lines := strings.Split(out, "\n")
 	inPre := false

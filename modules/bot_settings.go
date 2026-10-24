@@ -101,7 +101,7 @@ func (m *BotSettingsModule) HandleBotSettings(ctx context.Context, peer tg.Input
 		key := strings.ToUpper(parts[1])
 		val := strings.Join(parts[2:], " ")
 		if err := config.UpdateConfigVar(key, val); err == nil {
-			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✅ <b>%s</b> has been set to: <code>%s</code>", key, val), msg.MessageID, nil)
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>%s</b> has been set to: <code>%s</code>", key, val), msg.MessageID, nil)
 			return
 		}
 	}
@@ -115,11 +115,11 @@ func (m *BotSettingsModule) buildMainMenu() (string, *telegram.ButtonMaker) {
 	btn := telegram.NewButtonMaker()
 	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Config Variables"), "botset var 0", "primary")
 	btn.Row()
-	btn.IButtonStyled("📁 "+telegram.ToSmallCaps("Private Files"), "botset private", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Private Files"), "botset private", "primary")
 	btn.Row()
-	btn.IButtonStyled("📥 "+telegram.ToSmallCaps("Aria2c Settings"), "botset aria", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Aria2c Settings"), "botset aria", "primary")
 	btn.Row()
-	btn.IButtonStyled("🔗 "+telegram.ToSmallCaps("Shortener Settings"), "botset shortener", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Shortener Settings"), "botset shortener", "primary")
 	btn.Row()
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
 	btn.Row()
@@ -199,8 +199,8 @@ func (m *BotSettingsModule) buildVarDetailMenu(key string, page int, editing boo
 			"<i>Choose a valid value for the above Var:</i>",
 			telegram.ToSmallCaps("Boolean Configuration"), key, v)
 
-		btn.IButtonStyled("🟢 "+telegram.ToSmallCaps("True"), fmt.Sprintf("botset boolvar %s true %d", key, page), "success")
-		btn.IButtonStyled("🔴 "+telegram.ToSmallCaps("False"), fmt.Sprintf("botset boolvar %s false %d", key, page), "danger")
+		btn.IButtonStyled("✓ "+telegram.ToSmallCaps("True"), fmt.Sprintf("botset boolvar %s true %d", key, page), "success")
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("False"), fmt.Sprintf("botset boolvar %s false %d", key, page), "danger")
 		btn.Row()
 		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), fmt.Sprintf("botset var %d", page), "primary")
 		btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
@@ -216,7 +216,7 @@ func (m *BotSettingsModule) buildVarDetailMenu(key string, page int, editing boo
 			"<i>Send /cancel to abort.</i>",
 			telegram.ToSmallCaps("Edit Variable"), key, v)
 
-		btn.IButtonStyled("🛑 "+telegram.ToSmallCaps("Cancel Edit"), fmt.Sprintf("botset editvar %s %d", key, page), "danger")
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel Edit"), fmt.Sprintf("botset editvar %s %d", key, page), "danger")
 		btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), fmt.Sprintf("botset var %d", page), "primary")
 		btn.Row()
 		return text, btn
@@ -228,8 +228,8 @@ func (m *BotSettingsModule) buildVarDetailMenu(key string, page int, editing boo
 		"<i>Click <b>Edit Value</b> to update this setting directly:</i>",
 		telegram.ToSmallCaps("Variable Details"), key, v)
 
-	btn.IButtonStyled("✏️ "+telegram.ToSmallCaps("Edit Value"), fmt.Sprintf("botset editvar_prompt %s %d", key, page), "success")
-	btn.IButtonStyled("🔄 "+telegram.ToSmallCaps("Reset"), fmt.Sprintf("botset resetvar %s %d", key, page), "danger")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Edit Value"), fmt.Sprintf("botset editvar_prompt %s %d", key, page), "success")
+	btn.IButtonStyled("• "+telegram.ToSmallCaps("Reset"), fmt.Sprintf("botset resetvar %s %d", key, page), "danger")
 	btn.Row()
 	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), fmt.Sprintf("botset var %d", page), "primary")
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
@@ -241,18 +241,18 @@ func (m *BotSettingsModule) buildVarDetailMenu(key string, page int, editing boo
 func (m *BotSettingsModule) HandleSessionValue(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int) {
 	_ = config.UpdateConfigVar(key, val)
 	text, btn := m.buildVarDetailMenu(key, page, false)
-	text += "\n\n✅ <i>Value updated successfully!</i>"
+	text += "\n\n✓ <i>Value updated successfully!</i>"
 	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
 }
 
 func (m *BotSettingsModule) HandleSessionCancelled(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key string, page int) {
 	text, btn := m.buildVarDetailMenu(key, page, false)
-	text += "\n\n🛑 <i>Edit cancelled.</i>"
+	text += "\n\n× <i>Edit cancelled.</i>"
 	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
 }
 
 func (m *BotSettingsModule) buildAriaMenu() (string, *telegram.ButtonMaker) {
-	text := "📥 <b>Aria2c Performance Settings:</b>\n\n" +
+	text := "⌬ <b><u>Aria2c Performance Settings</u>:</b>\n\n" +
 		"┠ <b>max-connection-per-server:</b> <code>16</code> (Max)\n" +
 		"┠ <b>split:</b> <code>16</code> (Max)\n" +
 		"┠ <b>min-split-size:</b> <code>1M</code>\n" +
@@ -269,7 +269,7 @@ func (m *BotSettingsModule) buildAriaMenu() (string, *telegram.ButtonMaker) {
 }
 
 func (m *BotSettingsModule) buildPrivateMenu() (string, *telegram.ButtonMaker) {
-	text := fmt.Sprintf("📁 <b><u>%s:</u></b>\n\n"+
+	text := fmt.Sprintf("⌬ <b><u>%s:</u></b>\n\n"+
 		"<i>Send any of these private files as a document directly to the bot:</i>\n\n"+
 		"┠ <code>token.pickle</code> — Google Drive OAuth token (automatically loaded)\n"+
 		"┠ <code>config.env</code> — Bot environment variables (auto reloaded)\n"+
@@ -356,7 +356,7 @@ func (m *BotSettingsModule) HandleCallback(ctx context.Context, peer tg.InputPee
 			}
 			_ = config.UpdateConfigVar(key, val)
 			text, btn := m.buildVarDetailMenu(key, page, false)
-			text += fmt.Sprintf("\n\n✅ <i>%s set to %s!</i>", key, val)
+			text += fmt.Sprintf("\n\n✓ <i>%s set to %s!</i>", key, val)
 			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("%s set to %s", key, val), false)
 		}
@@ -371,7 +371,7 @@ func (m *BotSettingsModule) HandleCallback(ctx context.Context, peer tg.InputPee
 			defVal := defaultVarValues[key]
 			_ = config.UpdateConfigVar(key, defVal)
 			text, btn := m.buildVarDetailMenu(key, page, false)
-			text += fmt.Sprintf("\n\n🔄 <i>%s reset to default: %s</i>", key, defVal)
+			text += fmt.Sprintf("\n\n• <i>%s reset to default: %s</i>", key, defVal)
 			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("%s reset to default", key), false)
 		}
@@ -427,9 +427,9 @@ func (m *BotSettingsModule) buildShortenerMenu() (string, *telegram.ButtonMaker)
 		valStr = "Disabled (None)"
 	}
 
-	stEmoji := "🔴 Disabled"
+	stEmoji := "Disabled"
 	if isActive {
-		stEmoji = "🟢 Enabled"
+		stEmoji = "Enabled"
 	}
 
 	shDomain := cfg.Shortener
@@ -446,15 +446,15 @@ func (m *BotSettingsModule) buildShortenerMenu() (string, *telegram.ButtonMaker)
 
 	btn := telegram.NewButtonMaker()
 	if isActive {
-		btn.IButtonStyled("🔴 "+telegram.ToSmallCaps("Disable Shortener"), "botset toggleshrt", "danger")
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Disable Shortener"), "botset toggleshrt", "danger")
 	} else {
-		btn.IButtonStyled("🟢 "+telegram.ToSmallCaps("Enable Shortener (24h)"), "botset toggleshrt", "success")
+		btn.IButtonStyled("✓ "+telegram.ToSmallCaps("Enable Shortener (24h)"), "botset toggleshrt", "success")
 	}
 	btn.Row()
 
-	btn.IButtonStyled("⏱️ "+telegram.ToSmallCaps("24 Hours"), "botset setshrt 86400", "primary")
-	btn.IButtonStyled("⏱️ "+telegram.ToSmallCaps("12 Hours"), "botset setshrt 43200", "primary")
-	btn.IButtonStyled("⏱️ "+telegram.ToSmallCaps("6 Hours"), "botset setshrt 21600", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("24 Hours"), "botset setshrt 86400", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("12 Hours"), "botset setshrt 43200", "primary")
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("6 Hours"), "botset setshrt 21600", "primary")
 	btn.Row()
 
 	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset back", "primary")
