@@ -19,6 +19,7 @@ import (
 	"github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 var (
@@ -129,6 +130,34 @@ func ExtractMessageID(updates tg.UpdatesClass) int {
 	return 0
 }
 
+// parseFloodWait returns true and the required duration if the error is a Telegram FLOOD_WAIT error
+func parseFloodWait(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	if d, ok := tgerr.AsFloodWait(err); ok {
+		return d, true
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "FLOOD_WAIT_") {
+		parts := strings.Split(errStr, "FLOOD_WAIT_")
+		if len(parts) > 1 {
+			var secs int
+			for _, ch := range parts[1] {
+				if ch >= '0' && ch <= '9' {
+					secs = secs*10 + int(ch-'0')
+				} else {
+					break
+				}
+			}
+			if secs > 0 {
+				return time.Duration(secs) * time.Second, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, markup tg.ReplyMarkupClass) (int, error) {
 	plainText, entities := ParseFormatting(text)
 	req := &tg.MessagesSendMessageRequest{
@@ -146,13 +175,29 @@ func (m *MessageSender) SendMessage(ctx context.Context, peer tg.InputPeerClass,
 		req.ReplyMarkup = markup
 	}
 
-	updates, err := m.rawClient.MessagesSendMessage(ctx, req)
-	if err != nil {
-		log.Printf("[AZML-Go Bot Client] Error sending message to peer %T: %v", peer, err)
+	for attempt := 0; attempt < 5; attempt++ {
+		req.RandomID = time.Now().UnixNano()
+		updates, err := m.rawClient.MessagesSendMessage(ctx, req)
+		if err == nil {
+			return ExtractMessageID(updates), nil
+		}
+		if d, ok := parseFloodWait(err); ok {
+			if d > 60*time.Second {
+				d = 60 * time.Second
+			}
+			select {
+			case <-time.After(d + 200*time.Millisecond):
+				continue
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		if attempt == 4 {
+			log.Printf("[AZML-Go Bot Client] Error sending message to peer %T: %v", peer, err)
+		}
 		return 0, err
 	}
-	msgID := ExtractMessageID(updates)
-	return msgID, nil
+	return 0, fmt.Errorf("failed to send message after retries")
 }
 
 func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass, msgID int, text string, markup tg.ReplyMarkupClass) error {
@@ -169,14 +214,32 @@ func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass,
 	if markup != nil {
 		req.ReplyMarkup = markup
 	}
-	_, err := m.rawClient.MessagesEditMessage(ctx, req)
-	if err != nil {
+
+	for attempt := 0; attempt < 5; attempt++ {
+		_, err := m.rawClient.MessagesEditMessage(ctx, req)
+		if err == nil {
+			return nil
+		}
 		if strings.Contains(err.Error(), "MESSAGE_NOT_MODIFIED") || strings.Contains(err.Error(), "MESSAGE_ID_INVALID") || strings.Contains(err.Error(), "context canceled") {
 			return nil
 		}
-		log.Printf("[AZML-Go Bot Client] Error editing message %d: %v", msgID, err)
+		if d, ok := parseFloodWait(err); ok {
+			if d > 60*time.Second {
+				d = 60 * time.Second
+			}
+			select {
+			case <-time.After(d + 200*time.Millisecond):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if attempt == 4 {
+			log.Printf("[AZML-Go Bot Client] Error editing message %d: %v", msgID, err)
+		}
+		return err
 	}
-	return err
+	return nil
 }
 
 func PeerToChatID(peer tg.InputPeerClass) int64 {
@@ -202,7 +265,7 @@ func PeerToChatID(peer tg.InputPeerClass) int64 {
 	return 0
 }
 
-var botAPIHTTPClient = &http.Client{Timeout: 8 * time.Second}
+var botAPIHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
 func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
 	if btn == nil {
@@ -225,22 +288,36 @@ func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.Inpu
 			payload["reply_to_message_id"] = replyToID
 		}
 		body, _ := json.Marshal(payload)
-		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), bytes.NewReader(body))
-		if err == nil {
+		for attempt := 0; attempt < 2; attempt++ {
+			req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), bytes.NewReader(body))
+			if err != nil {
+				break
+			}
 			req.Header.Set("Content-Type", "application/json")
 			resp, rErr := botAPIHTTPClient.Do(req)
-			if rErr == nil {
-				defer resp.Body.Close()
-				var res struct {
-					Ok     bool `json:"ok"`
-					Result struct {
-						MessageID int `json:"message_id"`
-					} `json:"result"`
-				}
-				if json.NewDecoder(resp.Body).Decode(&res) == nil && res.Ok {
+			if rErr != nil {
+				break
+			}
+			defer resp.Body.Close()
+			var res struct {
+				Ok         bool `json:"ok"`
+				Result     struct {
+					MessageID int `json:"message_id"`
+				} `json:"result"`
+				Parameters struct {
+					RetryAfter int `json:"retry_after"`
+				} `json:"parameters"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&res) == nil {
+				if res.Ok {
 					return res.Result.MessageID, nil
 				}
+				if res.Parameters.RetryAfter > 0 && res.Parameters.RetryAfter <= 5 {
+					time.Sleep(time.Duration(res.Parameters.RetryAfter)*time.Second + 100*time.Millisecond)
+					continue
+				}
 			}
+			break
 		}
 	}
 
@@ -269,43 +346,55 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 			"disable_web_page_preview": true,
 		}
 		body, _ := json.Marshal(payload)
-		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken), bytes.NewReader(body))
-		if err == nil {
+		for attempt := 0; attempt < 2; attempt++ {
+			req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken), bytes.NewReader(body))
+			if err != nil {
+				break
+			}
 			req.Header.Set("Content-Type", "application/json")
 			resp, rErr := botAPIHTTPClient.Do(req)
-			if rErr == nil {
-				defer resp.Body.Close()
-				var res struct {
-					Ok          bool   `json:"ok"`
-					Description string `json:"description"`
+			if rErr != nil {
+				break
+			}
+			defer resp.Body.Close()
+			var res struct {
+				Ok          bool   `json:"ok"`
+				Description string `json:"description"`
+				Parameters  struct {
+					RetryAfter int `json:"retry_after"`
+				} `json:"parameters"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&res) == nil {
+				descLower := strings.ToLower(res.Description)
+				if res.Ok || strings.Contains(descLower, "not modified") || strings.Contains(descLower, "message to edit not found") || strings.Contains(descLower, "message_id_invalid") {
+					return nil
 				}
-				if json.NewDecoder(resp.Body).Decode(&res) == nil {
-					descLower := strings.ToLower(res.Description)
-					if res.Ok || strings.Contains(descLower, "not modified") || strings.Contains(descLower, "message to edit not found") || strings.Contains(descLower, "message_id_invalid") {
-						return nil
+				if res.Parameters.RetryAfter > 0 && res.Parameters.RetryAfter <= 5 {
+					time.Sleep(time.Duration(res.Parameters.RetryAfter)*time.Second + 100*time.Millisecond)
+					continue
+				}
+				// If the message is a photo/media message, editMessageText fails; edit caption instead!
+				if strings.Contains(descLower, "no text in the message") {
+					capPayload := map[string]interface{}{
+						"chat_id":      chatID,
+						"message_id":   msgID,
+						"caption":      text,
+						"parse_mode":   "HTML",
+						"reply_markup": json.RawMessage(kbJSON),
 					}
-					// If the message is a photo/media message, editMessageText fails; edit caption instead!
-					if strings.Contains(descLower, "no text in the message") {
-						capPayload := map[string]interface{}{
-							"chat_id":      chatID,
-							"message_id":   msgID,
-							"caption":      text,
-							"parse_mode":   "HTML",
-							"reply_markup": json.RawMessage(kbJSON),
-						}
-						cBody, _ := json.Marshal(capPayload)
-						cReq, cErr := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken), bytes.NewReader(cBody))
-						if cErr == nil {
-							cReq.Header.Set("Content-Type", "application/json")
-							cResp, crErr := botAPIHTTPClient.Do(cReq)
-							if crErr == nil {
-								cResp.Body.Close()
-								return nil
-							}
+					cBody, _ := json.Marshal(capPayload)
+					cReq, cErr := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken), bytes.NewReader(cBody))
+					if cErr == nil {
+						cReq.Header.Set("Content-Type", "application/json")
+						cResp, crErr := botAPIHTTPClient.Do(cReq)
+						if crErr == nil {
+							cResp.Body.Close()
+							return nil
 						}
 					}
 				}
 			}
+			break
 		}
 	}
 
@@ -318,27 +407,44 @@ func (m *MessageSender) DeleteMessage(ctx context.Context, peer tg.InputPeerClas
 		return nil
 	}
 	var err error
-	switch p := peer.(type) {
-	case *tg.InputPeerChannel:
-		accessHash := p.AccessHash
-		if accessHash == 0 {
-			accessHash = GetChannelAccessHash(p.ChannelID)
+	for attempt := 0; attempt < 3; attempt++ {
+		switch p := peer.(type) {
+		case *tg.InputPeerChannel:
+			accessHash := p.AccessHash
+			if accessHash == 0 {
+				accessHash = GetChannelAccessHash(p.ChannelID)
+			}
+			_, err = m.rawClient.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+				Channel: &tg.InputChannel{
+					ChannelID:  p.ChannelID,
+					AccessHash: accessHash,
+				},
+				ID: msgIDs,
+			})
+		default:
+			_, err = m.rawClient.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+				Revoke: true,
+				ID:     msgIDs,
+			})
 		}
-		_, err = m.rawClient.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
-			Channel: &tg.InputChannel{
-				ChannelID:  p.ChannelID,
-				AccessHash: accessHash,
-			},
-			ID: msgIDs,
-		})
-	default:
-		_, err = m.rawClient.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-			Revoke: true,
-			ID:     msgIDs,
-		})
-	}
-	if err != nil {
-		log.Printf("[AZML-Go Bot Client] Error deleting messages %v: %v", msgIDs, err)
+		if err == nil {
+			return nil
+		}
+		if strings.Contains(err.Error(), "MESSAGE_ID_INVALID") || strings.Contains(err.Error(), "context canceled") {
+			return nil
+		}
+		if d, ok := parseFloodWait(err); ok {
+			if d > 15*time.Second {
+				d = 15 * time.Second
+			}
+			select {
+			case <-time.After(d + 200*time.Millisecond):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		break
 	}
 	return err
 }

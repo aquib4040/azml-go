@@ -79,8 +79,14 @@ func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass,
 	m.mu.Lock()
 	oldInfo, hasOld := m.statusReplies[msg.ChatID]
 	if hasOld && oldInfo != nil && oldInfo.MessageID > 0 {
-		_ = m.sender.DeleteMessage(ctx, oldInfo.Peer, []int{oldInfo.MessageID})
+		oldPeer := oldInfo.Peer
+		oldID := oldInfo.MessageID
 		delete(m.statusReplies, msg.ChatID)
+		go func() {
+			delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = m.sender.DeleteMessage(delCtx, oldPeer, []int{oldID})
+		}()
 	}
 	m.mu.Unlock()
 
@@ -143,7 +149,9 @@ func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPe
 		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
-	go m.UpdateAllMessages(context.Background(), true)
+	if m.taskMgr.Count() > 0 {
+		go m.UpdateAllMessages(context.Background(), true)
+	}
 }
 
 func (m *StatusModule) RemoveStatusMessage(chatID int64) {
@@ -297,9 +305,21 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 
 // UpdateAllMessages periodically refreshes active status messages on their current active page
 func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
-	// If no tasks are running, automatically delete all status progress messages immediately
+	// If no tasks are running, check if any status reply was created very recently (within 15s)
+	// Brand new tasks being initiated should never have their status messages wiped!
 	if m.taskMgr.Count() == 0 {
-		m.DeleteAllMessages(ctx)
+		m.mu.Lock()
+		hasRecent := false
+		for _, r := range m.statusReplies {
+			if r != nil && time.Since(r.CreatedAt) < 15*time.Second {
+				hasRecent = true
+				break
+			}
+		}
+		m.mu.Unlock()
+		if !hasRecent {
+			m.DeleteAllMessages(ctx)
+		}
 		return
 	}
 

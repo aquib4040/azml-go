@@ -431,8 +431,6 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		return
 	}
 
-	log.Printf("[AZML-Go] Command %q from user %d in chat %d", text, senderID, chatID)
-
 	msgCtx := &types.MessageContext{
 		ChatID:     chatID,
 		MessageID:  m.ID,

@@ -334,6 +334,24 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			displayName = msg.FileName
 		}
 	}
+
+	// For HTTP/HTTPS links: probe remote headers to resolve true filename (Content-Disposition) & extension
+	if ext.IsURL(link) && !ext.IsMagnet(link) && !strings.Contains(strings.ToLower(link), ".torrent") {
+		resolvedName, finalURL, resolvedSize, _ := ext.ResolveDownloadMetadata(ctx, link)
+		if resolvedName != "" {
+			if opt.CustomName == "" {
+				opt.CustomName = resolvedName
+			}
+			displayName = resolvedName
+		}
+		if finalURL != "" {
+			link = finalURL
+		}
+		if msg.FileSize == 0 && resolvedSize > 0 {
+			msg.FileSize = resolvedSize
+		}
+	}
+
 	displayName = filepath.Base(displayName)
 
 	uTask := ext.NewUnifiedTask(taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
@@ -341,6 +359,9 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	// Instantly render the status progress bar so the user never sees a stuck "Initiating..." message
 	if notifyID > 0 {
+		if m.statusMod != nil {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		}
 		text, btn := m.taskMgr.BuildStatusMessage(1)
 		_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
 	}
@@ -988,6 +1009,11 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		finalName, caption := ext.FormatFilename(filepath.Base(curFile), user, curFile)
 		if opt.CustomName != "" && len(filesToUpload) == 1 {
 			finalName = opt.CustomName
+		}
+		if filepath.Ext(finalName) == "" {
+			if detectedExt := ext.DetectExtension(curFile); detectedExt != "" {
+				finalName += detectedExt
+			}
 		}
 		finalName = ext.SanitizeFilename(finalName)
 		uTask.SetName(finalName)

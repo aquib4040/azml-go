@@ -169,6 +169,7 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--bt-tracker="+defaultTrackers,
 		"--peer-id-prefix=-qB4520-",
 		"--peer-agent=qBittorrent/4.5.2",
+		"--content-disposition-default-utf8=true",
 		"--daemon=true",
 	)
 
@@ -216,6 +217,7 @@ func (a *Aria2RPCClient) AddURI(link, downloadDir, filename string, headers []st
 		"seed-time":                   "0",
 		"seed-ratio":                  "0.0",
 		"follow-torrent":              "mem",
+		"content-disposition-default-utf8": "true",
 	}
 
 	if filename != "" {

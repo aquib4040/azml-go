@@ -223,6 +223,12 @@ func FormatFilename(filename string, user *types.UserSettings, filePath string) 
 		formatted = base + suffix + ext
 	}
 
+	if filepath.Ext(formatted) == "" && filePath != "" {
+		if detectedExt := DetectExtension(filePath); detectedExt != "" {
+			formatted += detectedExt
+		}
+	}
+
 	formatted = SanitizeFilename(formatted)
 
 	caption := formatted
@@ -255,6 +261,89 @@ func FormatFilename(filename string, user *types.UserSettings, filePath string) 
 	}
 
 	return formatted, caption
+}
+
+// DetectExtension inspects binary magic bytes and media streams to detect a file's true extension
+func DetectExtension(filePath string) string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	header := make([]byte, 512)
+	n, _ := f.Read(header)
+	if n < 4 {
+		return ""
+	}
+
+	// EBML Matroska / WebM
+	if bytes.HasPrefix(header, []byte{0x1A, 0x45, 0xDF, 0xA3}) {
+		if bytes.Contains(header[:n], []byte("webm")) {
+			return ".webm"
+		}
+		return ".mkv"
+	}
+
+	// MP4 (ftyp at offset 4)
+	if n >= 8 && string(header[4:8]) == "ftyp" {
+		return ".mp4"
+	}
+
+	// AVI (RIFF ... AVI )
+	if n >= 12 && string(header[0:4]) == "RIFF" && string(header[8:12]) == "AVI " {
+		return ".avi"
+	}
+
+	// FLV
+	if bytes.HasPrefix(header, []byte("FLV")) {
+		return ".flv"
+	}
+
+	// ZIP / 7Z / RAR
+	if bytes.HasPrefix(header, []byte{0x50, 0x4B, 0x03, 0x04}) {
+		return ".zip"
+	}
+	if bytes.HasPrefix(header, []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}) {
+		return ".7z"
+	}
+	if bytes.HasPrefix(header, []byte("Rar!")) {
+		return ".rar"
+	}
+
+	// Audio formats
+	if bytes.HasPrefix(header, []byte("ID3")) || (header[0] == 0xFF && (header[1]&0xE0) == 0xE0) {
+		return ".mp3"
+	}
+	if bytes.HasPrefix(header, []byte("fLaC")) {
+		return ".flac"
+	}
+	if bytes.HasPrefix(header, []byte("OggS")) {
+		return ".ogg"
+	}
+
+	// PDF / Images
+	if bytes.HasPrefix(header, []byte("%PDF")) {
+		return ".pdf"
+	}
+	if bytes.HasPrefix(header, []byte{0xFF, 0xD8, 0xFF}) {
+		return ".jpg"
+	}
+	if bytes.HasPrefix(header, []byte{0x89, 0x50, 0x4E, 0x47}) {
+		return ".png"
+	}
+
+	// Fallback to ProbeMedia if ffprobe is installed
+	if details, err := ProbeMedia(filePath); err == nil && details != nil {
+		if details.Width > 0 || details.VideoCodec != "" {
+			return ".mkv"
+		}
+		if details.AudioCodec != "" {
+			return ".mp3"
+		}
+	}
+
+	return ""
 }
 
 func applyRegexRemname(filename, rules string) string {

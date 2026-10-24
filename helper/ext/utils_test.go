@@ -209,3 +209,86 @@ func TestGetMD5HashAndPathSize(t *testing.T) {
 		t.Errorf("GetPathSize = %d; want %d", size, len(content))
 	}
 }
+
+func TestParseContentDispositionFilename(t *testing.T) {
+	tests := []struct {
+		name     string
+		cd       string
+		expected string
+	}{
+		{
+			name:     "empty header",
+			cd:       "",
+			expected: "",
+		},
+		{
+			name:     "standard filename quotes",
+			cd:       `attachment; filename="video.mp4"`,
+			expected: "video.mp4",
+		},
+		{
+			name:     "canon DDL real-world header",
+			cd:       `attachment; filename="S03E04 Apothecary Diaries [HDRip] SUB [@Anime_Canon].mkv"; filename*=UTF-8''S03E04%20Apothecary%20Diaries%20%5BHDRip%5D%20SUB%20%5B@Anime_Canon%5D.mkv`,
+			expected: "S03E04 Apothecary Diaries [HDRip] SUB [@Anime_Canon].mkv",
+		},
+		{
+			name:     "RFC 5987 UTF-8 encoded with spaces",
+			cd:       `inline; filename*=UTF-8''My%20Custom%20Video.mkv`,
+			expected: "My Custom Video.mkv",
+		},
+		{
+			name:     "unquoted filename",
+			cd:       `attachment; filename=archive.zip`,
+			expected: "archive.zip",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := ParseContentDispositionFilename(tt.cd)
+			if res != tt.expected {
+				t.Errorf("ParseContentDispositionFilename(%q) = %q; want %q", tt.cd, res, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMimeToExtension(t *testing.T) {
+	if ext := MimeToExtension("video/x-matroska"); ext != ".mkv" {
+		t.Errorf("MimeToExtension(video/x-matroska) = %q; want .mkv", ext)
+	}
+	if ext := MimeToExtension("video/mp4"); ext != ".mp4" {
+		t.Errorf("MimeToExtension(video/mp4) = %q; want .mp4", ext)
+	}
+	if ext := MimeToExtension("application/zip"); ext != ".zip" {
+		t.Errorf("MimeToExtension(application/zip) = %q; want .zip", ext)
+	}
+	if ext := MimeToExtension("unknown/binary"); ext != "" {
+		t.Errorf("MimeToExtension(unknown/binary) = %q; want empty", ext)
+	}
+}
+
+func TestDetectExtension(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Matroska EBML
+	mkvFile := filepath.Join(tmpDir, "sample_mkv")
+	_ = os.WriteFile(mkvFile, []byte{0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x02, 0x03}, 0644)
+	if ext := DetectExtension(mkvFile); ext != ".mkv" {
+		t.Errorf("DetectExtension(mkvFile) = %q; want .mkv", ext)
+	}
+
+	// MP4
+	mp4File := filepath.Join(tmpDir, "sample_mp4")
+	_ = os.WriteFile(mp4File, []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, 0644)
+	if ext := DetectExtension(mp4File); ext != ".mp4" {
+		t.Errorf("DetectExtension(mp4File) = %q; want .mp4", ext)
+	}
+
+	// ZIP
+	zipFile := filepath.Join(tmpDir, "sample_zip")
+	_ = os.WriteFile(zipFile, []byte{0x50, 0x4B, 0x03, 0x04, 0x00, 0x00}, 0644)
+	if ext := DetectExtension(zipFile); ext != ".zip" {
+		t.Errorf("DetectExtension(zipFile) = %q; want .zip", ext)
+	}
+}

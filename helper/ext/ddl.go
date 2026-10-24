@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -297,3 +299,175 @@ func extractSolidfilesLink(link string) (string, error) {
 
 	return link, nil
 }
+
+// ParseContentDispositionFilename extracts the real filename from a Content-Disposition header string
+func ParseContentDispositionFilename(cd string) string {
+	if cd == "" {
+		return ""
+	}
+
+	// 1. Check for RFC 5987 / RFC 6266 filename*=UTF-8''... (highest precedence)
+	reUTF8 := regexp.MustCompile(`(?i)filename\*=(?:UTF-8|utf-8)''([^;\s]+)`)
+	if match := reUTF8.FindStringSubmatch(cd); len(match) > 1 {
+		raw := match[1]
+		if unescaped, err := url.QueryUnescape(raw); err == nil && unescaped != "" {
+			clean := filepath.Base(strings.Trim(unescaped, "\"' "))
+			if clean != "" && clean != "." && clean != "/" {
+				return clean
+			}
+		}
+	}
+
+	// 2. Check standard mime.ParseMediaType
+	if _, params, err := mime.ParseMediaType(cd); err == nil {
+		if fn, ok := params["filename"]; ok && fn != "" {
+			clean := filepath.Base(strings.Trim(fn, "\"' "))
+			if clean != "" && clean != "." && clean != "/" {
+				return clean
+			}
+		}
+	}
+
+	// 3. Fallback regex for filename="..." or filename='...' or filename=...
+	reGeneric := regexp.MustCompile(`(?i)filename\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s;]+))`)
+	if match := reGeneric.FindStringSubmatch(cd); len(match) > 0 {
+		for i := 1; i < len(match); i++ {
+			if match[i] != "" {
+				clean := filepath.Base(strings.Trim(match[i], "\"' "))
+				if unescaped, err := url.QueryUnescape(clean); err == nil && unescaped != "" {
+					clean = unescaped
+				}
+				if clean != "" && clean != "." && clean != "/" {
+					return clean
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// MimeToExtension maps common media and archive MIME types to their standard file extension
+func MimeToExtension(cType string) string {
+	switch cType {
+	case "video/x-matroska":
+		return ".mkv"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "video/quicktime":
+		return ".mov"
+	case "video/x-msvideo":
+		return ".avi"
+	case "video/x-flv":
+		return ".flv"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/mp4", "audio/m4a", "audio/x-m4a":
+		return ".m4a"
+	case "audio/flac", "audio/x-flac":
+		return ".flac"
+	case "audio/ogg", "audio/opus":
+		return ".ogg"
+	case "application/zip":
+		return ".zip"
+	case "application/x-rar-compressed", "application/vnd.rar", "application/x-rar":
+		return ".rar"
+	case "application/x-7z-compressed":
+		return ".7z"
+	case "application/x-tar":
+		return ".tar"
+	case "application/pdf":
+		return ".pdf"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ""
+	}
+}
+
+// ResolveDownloadMetadata probes a remote URL via a lightweight Range GET request (or HEAD fallback)
+// to extract the true filename, final redirected URL, and content size from response headers.
+func ResolveDownloadMetadata(ctx context.Context, rawURL string) (string, string, int64, error) {
+	if !IsURL(rawURL) {
+		return "", rawURL, 0, nil
+	}
+
+	client := &http.Client{
+		Timeout: 7 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	if err != nil {
+		return "", rawURL, 0, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// Fallback: try HEAD request if range GET failed
+		hReq, hErr := http.NewRequestWithContext(ctx, "HEAD", rawURL, nil)
+		if hErr != nil {
+			return "", rawURL, 0, err
+		}
+		hReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+		resp, err = client.Do(hReq)
+		if err != nil {
+			return "", rawURL, 0, err
+		}
+	}
+	defer resp.Body.Close()
+
+	finalURL := rawURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+
+	var totalSize int64
+	// Check Content-Range: bytes 0-0/1473401238
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		parts := strings.Split(cr, "/")
+		if len(parts) == 2 {
+			totalSize, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		}
+	}
+	if totalSize <= 0 && resp.ContentLength > 0 && resp.StatusCode == http.StatusOK {
+		totalSize = resp.ContentLength
+	}
+
+	// 1. Extract filename from Content-Disposition header
+	cd := resp.Header.Get("Content-Disposition")
+	filename := ParseContentDispositionFilename(cd)
+
+	// 2. If no filename in Content-Disposition, check final URL path
+	if filename == "" && resp.Request != nil && resp.Request.URL != nil {
+		urlPath := resp.Request.URL.Path
+		cleanBase := filepath.Base(urlPath)
+		if strings.Contains(cleanBase, ".") && cleanBase != "." && cleanBase != "/" {
+			filename = cleanBase
+		}
+	}
+
+	// 3. If filename has no extension or is missing, map Content-Type
+	cType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(cType, ";") {
+		cType = strings.TrimSpace(strings.Split(cType, ";")[0])
+	}
+
+	mimeExt := MimeToExtension(cType)
+	if filename != "" {
+		if filepath.Ext(filename) == "" && mimeExt != "" {
+			filename += mimeExt
+		}
+	}
+
+	return filename, finalURL, totalSize, nil
+}
+
