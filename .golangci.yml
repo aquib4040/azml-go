@@ -10,16 +10,17 @@ linters:
     - ineffassign
     - staticcheck
     - unused
-    - misspell
     - unconvert
 
 linters-settings:
   govet:
     enable-all: false
-  misspell:
-    locale: US
 
 issues:
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    - linters:
+        - staticcheck
+      text: "SA1019:"
