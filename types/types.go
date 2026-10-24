@@ -4,10 +4,13 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/gotd/td/tg"
 )
 
 type UserSettings struct {
 	UserID         int64             `json:"user_id" bson:"_id"`
+	Name           string            `json:"name" bson:"name"`
 	IsAuth         bool              `json:"is_auth" bson:"is_auth"`
 	IsSudo         bool              `json:"is_sudo" bson:"is_sudo"`
 	IsBlacklist    bool              `json:"is_blacklist" bson:"is_blacklist"`
@@ -25,11 +28,14 @@ type UserSettings struct {
 	CustomThumb    string            `json:"custom_thumb" bson:"custom_thumb"`
 	SplitSize      int64             `json:"split_size" bson:"split_size"`
 	EqualSplits    bool              `json:"equal_splits" bson:"equal_splits"`
+	MediaGroup     bool              `json:"media_group" bson:"media_group"`
 	AsDoc          bool              `json:"as_doc" bson:"as_doc"`
 	DumpChatID     int64             `json:"dump_chat_id" bson:"dump_chat_id"`
 	Metadata       map[string]string `json:"metadata" bson:"metadata"`
 	FFmpegCommands map[string]string `json:"ffmpeg_cmds" bson:"ffmpeg_cmds"`
 	AutoThumb      bool              `json:"auto_thumb" bson:"auto_thumb"`
+	BotPM          bool              `json:"bot_pm" bson:"bot_pm"`
+	StartedInPM    bool              `json:"started_in_pm" bson:"started_in_pm"`
 	TopicIDs       []int             `json:"topic_ids" bson:"topic_ids"`
 }
 
@@ -101,6 +107,7 @@ type MessageContext struct {
 	MessageID   int
 	UserID      int64
 	SenderName  string
+	Username    string
 	Text        string
 	ReplyToID   int
 	ReplyText   string
@@ -111,6 +118,7 @@ type MessageContext struct {
 	FileID      string
 	FileName    string
 	FileSize    int64
+	RawMedia    tg.MessageMediaClass
 }
 
 type SafeUserMap struct {

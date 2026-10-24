@@ -12,6 +12,7 @@ import (
 type Config struct {
 	BotToken                  string
 	OwnerID                   int64
+	OwnerUsername             string
 	TelegramAPI               int
 	TelegramHash              string
 	UserSessionString         string
@@ -28,6 +29,7 @@ type Config struct {
 	EqualSplits               bool
 	AsDocument                bool
 	MediaGroup                bool
+	BotPM                     bool
 	CapFont                   string
 	LeechFilenamePrefix       string
 	LeechFilenameSuffix       string
@@ -38,6 +40,7 @@ type Config struct {
 	LeechLogID                int64
 	LinksLogID                int64
 	TorrentTimeout            int
+	Aria2Port                 int
 	BaseURL                   string
 	BaseURLPort               int
 	MegaEmail                 string
@@ -118,6 +121,7 @@ func LoadConfig(path string) (*Config, error) {
 	GlobalConfig = Config{
 		BotToken:                  getEnv("BOT_TOKEN", ""),
 		OwnerID:                   getEnvInt64("OWNER_ID", 0),
+		OwnerUsername:             strings.TrimPrefix(getEnv("OWNER_USERNAME", "issei_senpai"), "@"),
 		TelegramAPI:               getEnvInt("TELEGRAM_API", 0),
 		TelegramHash:              getEnv("TELEGRAM_HASH", ""),
 		UserSessionString:         getEnv("USER_SESSION_STRING", ""),
@@ -134,6 +138,7 @@ func LoadConfig(path string) (*Config, error) {
 		EqualSplits:               getEnvBool("EQUAL_SPLITS", false),
 		AsDocument:                getEnvBool("AS_DOCUMENT", false),
 		MediaGroup:                getEnvBool("MEDIA_GROUP", false),
+		BotPM:                     getEnvBool("BOT_PM", false),
 		CapFont:                   getEnv("CAP_FONT", "code"),
 		LeechFilenamePrefix:       getEnv("LEECH_FILENAME_PREFIX", ""),
 		LeechFilenameSuffix:       getEnv("LEECH_FILENAME_SUFFIX", ""),
@@ -144,6 +149,7 @@ func LoadConfig(path string) (*Config, error) {
 		LeechLogID:                getEnvInt64("LEECH_LOG_ID", 0),
 		LinksLogID:                getEnvInt64("LINKS_LOG_ID", 0),
 		TorrentTimeout:            getEnvInt("TORRENT_TIMEOUT", 0),
+		Aria2Port:                 getEnvInt("ARIA2_PORT", 6810),
 		BaseURL:                   getEnv("BASE_URL", ""),
 		BaseURLPort:               getEnvInt("PORT", getEnvInt("BASE_URL_PORT", 23434)),
 		MegaEmail:                 getEnv("MEGA_EMAIL", ""),
@@ -261,6 +267,8 @@ func UpdateConfigVar(key, val string) error {
 
 	key = strings.ToUpper(strings.TrimSpace(key))
 	switch key {
+	case "OWNER_USERNAME":
+		GlobalConfig.OwnerUsername = strings.TrimPrefix(strings.TrimSpace(val), "@")
 	case "STATUS_LIMIT":
 		GlobalConfig.StatusLimit, _ = strconv.Atoi(val)
 	case "STATUS_UPDATE_INTERVAL":
@@ -291,6 +299,8 @@ func UpdateConfigVar(key, val string) error {
 		GlobalConfig.LeechFilenameRemnameAuto = val
 	case "LEECH_FILENAME_REMNAME_REGEX":
 		GlobalConfig.LeechFilenameRemnameRegex = val
+	case "LEECH_LOG_ID":
+		GlobalConfig.LeechLogID, _ = strconv.ParseInt(val, 10, 64)
 	case "TORRENT_TIMEOUT":
 		GlobalConfig.TorrentTimeout, _ = strconv.Atoi(val)
 	case "SHORTENER":
@@ -354,6 +364,8 @@ func GetConfigMap() map[string]string {
 	defer configLock.RUnlock()
 
 	return map[string]string{
+		"OWNER_USERNAME":              GlobalConfig.OwnerUsername,
+		"LEECH_LOG_ID":                strconv.FormatInt(GlobalConfig.LeechLogID, 10),
 		"STATUS_LIMIT":                 strconv.Itoa(GlobalConfig.StatusLimit),
 		"STATUS_UPDATE_INTERVAL":       strconv.Itoa(GlobalConfig.StatusUpdateInterval),
 		"AUTO_DELETE_MESSAGE_DURATION": strconv.Itoa(GlobalConfig.AutoDeleteMessageDuration),
@@ -361,41 +373,21 @@ func GetConfigMap() map[string]string {
 		"AS_DOCUMENT":                  strconv.FormatBool(GlobalConfig.AsDocument),
 		"EQUAL_SPLITS":                 strconv.FormatBool(GlobalConfig.EqualSplits),
 		"MEDIA_GROUP":                  strconv.FormatBool(GlobalConfig.MediaGroup),
-		"CAP_FONT":                     GlobalConfig.CapFont,
+		"AUTO_THUMBNAIL":               strconv.FormatBool(GlobalConfig.AutoThumbnail),
 		"LEECH_FILENAME_PREFIX":        GlobalConfig.LeechFilenamePrefix,
 		"LEECH_FILENAME_SUFFIX":        GlobalConfig.LeechFilenameSuffix,
 		"LEECH_FILENAME_CAPTION":       GlobalConfig.LeechFilenameCaption,
-		"LEECH_FILENAME_REMNAME_AUTO":  GlobalConfig.LeechFilenameRemnameAuto,
-		"LEECH_FILENAME_REMNAME_REGEX": GlobalConfig.LeechFilenameRemnameRegex,
 		"TORRENT_TIMEOUT":              strconv.Itoa(GlobalConfig.TorrentTimeout),
 		"BASE_URL":                     GlobalConfig.BaseURL,
-		"BASE_URL_PORT":                strconv.Itoa(GlobalConfig.BaseURLPort),
-		"SHORTENER":                    GlobalConfig.Shortener,
-		"SHORTENER_API":                GlobalConfig.ShortenerAPI,
-		"SHORTENER_ENABLED":            strconv.FormatBool(GlobalConfig.ShortenerEnabled),
-		"TOKEN_TIMEOUT":                strconv.FormatInt(GlobalConfig.TokenTimeout, 10),
-		"SCREENSHOTS_MODE":             strconv.FormatBool(GlobalConfig.ScreenshotsMode),
-		"ENABLE_FFMPEG_CMDS":           strconv.FormatBool(GlobalConfig.EnableFFmpegCmds),
-		"FFMPEG_ENCODING":              strconv.FormatBool(GlobalConfig.FFmpegEncoding),
-		"TMDB_ACCESS_TOKEN":            GlobalConfig.TMDBAccessToken,
-		"AUTO_THUMBNAIL":               strconv.FormatBool(GlobalConfig.AutoThumbnail),
-		"COVER_IMAGE":                  GlobalConfig.CoverImage,
-		"DDL_API":                      GlobalConfig.DDLAPI,
-		"QUEUE_ALL":                    strconv.Itoa(GlobalConfig.QueueAll),
-		"QUEUE_DOWNLOAD":               strconv.Itoa(GlobalConfig.QueueDownload),
-		"QUEUE_UPLOAD":                 strconv.Itoa(GlobalConfig.QueueUpload),
-		"USER_MAX_TASKS":               strconv.Itoa(GlobalConfig.QueueDownload),
 		"BOT_MAX_TASKS":                strconv.Itoa(GlobalConfig.QueueAll),
+		"USER_MAX_TASKS":               strconv.Itoa(GlobalConfig.QueueDownload),
 		"LEECH_LIMIT":                  strconv.FormatInt(GlobalConfig.LeechLimit, 10),
 		"TORRENT_LIMIT":                strconv.FormatInt(GlobalConfig.TorrentLimit, 10),
 		"DIRECT_LIMIT":                 strconv.FormatInt(GlobalConfig.DirectLimit, 10),
 		"YTDLP_LIMIT":                  strconv.FormatInt(GlobalConfig.YtdlpLimit, 10),
 		"MEGA_LIMIT":                   strconv.FormatInt(GlobalConfig.MegaLimit, 10),
-		"ARCHIVE_LIMIT":                strconv.FormatInt(GlobalConfig.ArchiveLimit, 10),
-		"EXTRACT_LIMIT":                strconv.FormatInt(GlobalConfig.ExtractLimit, 10),
 		"DAILY_LEECH_LIMIT":            strconv.FormatInt(GlobalConfig.DailyLeechLimit, 10),
 		"DAILY_TASK_LIMIT":             strconv.Itoa(GlobalConfig.DailyTaskLimit),
-		"STORAGE_THRESHOLD":            strconv.FormatInt(GlobalConfig.StorageThreshold, 10),
 	}
 }
 

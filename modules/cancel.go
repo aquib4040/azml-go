@@ -97,13 +97,13 @@ func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerCla
 	}
 
 	btn := telegram.NewButtonMaker()
-	btn.IButton("Downloading", "canall downloading")
-	btn.IButton("Uploading", "canall uploading")
-	btn.IButton("Paused", "canall paused")
-	btn.IButton("QueuedDl", "canall queueddl")
-	btn.IButton("QueuedUp", "canall queueup")
-	btn.IButton("All Tasks", "canall all")
-	btn.IButton("Close", "canall close")
+	btn.IButtonStyled("📥 "+telegram.ToSmallCaps("Downloading"), "canall downloading", "primary")
+	btn.IButtonStyled("📤 "+telegram.ToSmallCaps("Uploading"), "canall uploading", "primary")
+	btn.IButtonStyled("⏸️ "+telegram.ToSmallCaps("Paused"), "canall paused", "primary")
+	btn.IButtonStyled("⏳ "+telegram.ToSmallCaps("Queued Dl"), "canall queueddl", "primary")
+	btn.IButtonStyled("⌛ "+telegram.ToSmallCaps("Queued Up"), "canall queueup", "primary")
+	btn.IButtonStyled("⛔ "+telegram.ToSmallCaps("All Tasks"), "canall all", "danger")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "canall close", "danger")
 
 	_, _ = m.sender.SendMessage(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn.BuildMenu(2))
 }

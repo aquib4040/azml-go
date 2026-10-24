@@ -1,11 +1,15 @@
 package bot
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,9 +56,11 @@ type BotApp struct {
 	cancelCbHandler  func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	settingsHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	settingsCbHandler func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
-	bsettingHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	bsettingCbHandler func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
-	authHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	bsettingHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	bsettingCbHandler     func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
+	bsettingInputHandler  func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int)
+	bsettingCancelHandler func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key string, page int)
+	authHandler           func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	unauthHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	addSudoHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	rmSudoHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
@@ -206,6 +212,10 @@ func (b *BotApp) SetBotSettingsHandlers(h func(ctx context.Context, peer tg.Inpu
 	b.bsettingHandler = h
 	b.bsettingCbHandler = cb
 }
+func (b *BotApp) SetBotSettingsInputHandlers(val func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int), cancel func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key string, page int)) {
+	b.bsettingInputHandler = val
+	b.bsettingCancelHandler = cancel
+}
 func (b *BotApp) SetAuthorizeHandlers(auth, unauth, addSudo, rmSudo, addPrem, rmPrem, checkPrem func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
 	b.authHandler = auth
 	b.unauthHandler = unauth
@@ -294,12 +304,14 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 	chatID := getPeerID(m.PeerID)
 	senderID := chatID
 	senderName := "User"
+	senderUsername := ""
 
 	if m.FromID != nil {
 		if uPeer, ok := m.FromID.(*tg.PeerUser); ok {
 			senderID = uPeer.UserID
 			if uObj, exists := entities.Users[senderID]; exists {
 				senderName = uObj.FirstName
+				senderUsername = uObj.Username
 				b.cacheAccessHash(senderID, uObj.AccessHash)
 			}
 		}
@@ -307,13 +319,65 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		senderID = uPeer.UserID
 		if uObj, exists := entities.Users[senderID]; exists {
 			senderName = uObj.FirstName
+			senderUsername = uObj.Username
 			b.cacheAccessHash(senderID, uObj.AccessHash)
 		}
 	}
 
 	text := strings.TrimSpace(m.Message)
 
-	// 1. Handle incoming private media attachments (token.pickle, config.env, cookies.txt, accounts.zip)
+	// Automatically record user has started/interacted in PM
+	if chatID == senderID {
+		u := b.userMap.GetOrCreate(senderID)
+		if !u.StartedInPM {
+			u.StartedInPM = true
+			b.userMap.Set(u)
+			_ = ext.DB.SaveUser(u)
+		}
+	}
+
+	// Check if user is in an active pending setting prompt session (e.g. from /us)
+	if sess, ok := ext.GetPendingSettingSession(senderID, chatID); ok && sess != nil {
+		if text == "/cancel" {
+			ext.ClearPendingSettingSession(senderID)
+			_, _ = b.sender.SendMessage(ctx, peer, "🛑 <i>Setting change cancelled.</i>", m.ID, nil)
+			return
+		}
+		if !strings.HasPrefix(text, "/") {
+			ext.ClearPendingSettingSession(senderID)
+			u := b.userMap.GetOrCreate(senderID)
+			b.applyUserSettingValue(ctx, peer, u, sess.Key, text, sess.PromptMsgID)
+			return
+		}
+	}
+
+	// Check if user is in an active pending bot setting prompt session (from /bs)
+	if bSess, ok := ext.GetPendingBotSettingSession(senderID, chatID); ok && bSess != nil {
+		if text == "/cancel" {
+			ext.ClearPendingBotSettingSession(senderID)
+			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			if b.bsettingCancelHandler != nil {
+				b.bsettingCancelHandler(ctx, peer, bSess.PromptMsgID, bSess.Key, bSess.Page)
+			}
+			return
+		}
+		if !strings.HasPrefix(text, "/") {
+			ext.ClearPendingBotSettingSession(senderID)
+			_ = b.sender.DeleteMessage(ctx, peer, []int{m.ID})
+			if b.bsettingInputHandler != nil {
+				b.bsettingInputHandler(ctx, peer, bSess.PromptMsgID, bSess.Key, text, bSess.Page)
+			}
+			return
+		}
+	}
+
+	if ext.IsPendingThumbSession(senderID, chatID) && text == "/cancel" {
+		ext.ClearPendingThumbSession(senderID)
+		_, _ = b.sender.SendMessage(ctx, peer, "🛑 <i>Custom thumbnail upload cancelled.</i>", m.ID, nil)
+		return
+	}
+
+	// 1. Handle incoming private media attachments (token.pickle, config.env, cookies.txt, accounts.zip, thumbnails)
 	if m.Media != nil {
 		if b.handleIncomingMedia(ctx, peer, m, senderID, chatID) {
 			return
@@ -335,8 +399,10 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		MessageID:  m.ID,
 		UserID:     senderID,
 		SenderName: senderName,
+		Username:   senderUsername,
 		Text:       text,
 		HasMedia:   m.Media != nil,
+		RawMedia:   m.Media,
 	}
 
 	if m.ReplyTo != nil {
@@ -349,6 +415,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				msgCtx.ReplyText = repliedMsg.Message
 				if repliedMsg.Media != nil {
 					msgCtx.HasMedia = true
+					msgCtx.RawMedia = repliedMsg.Media
 				}
 			}
 		}
@@ -392,21 +459,46 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		return
 	}
 
-	isCancel, _ := telegram.MatchCancelCommand(text)
+	// 6. Bot PM Check (AZML style): If command is executed in a group, verify user has started the bot in PM
+	isOwnerOrSudo := telegram.IsSudo(senderID, b.userMap)
+	isGroupChat := chatID != senderID
+	switch m.PeerID.(type) {
+	case *tg.PeerChat, *tg.PeerChannel:
+		isGroupChat = true
+	}
 
-	// Dispatch commands
+	if !isOwnerOrSudo && isGroupChat {
+		u := b.userMap.Get(senderID)
+		if u == nil || !u.StartedInPM {
+			botUser := b.botUsername
+			if botUser == "" {
+				botUser = telegram.CurrentBotUsername
+			}
+			btn := telegram.NewButtonMaker()
+			btn.UButtonStyled("🚀 "+telegram.ToSmallCaps("Start Bot in PM"), fmt.Sprintf("https://t.me/%s?start=start", botUser), "primary")
+			sentID, err := b.sender.SendMessage(ctx, peer, "<i>You didn't START the bot in PM (Private)</i>", m.ID, btn.BuildMenu(1))
+			if err == nil && sentID > 0 {
+				b.sender.AutoDeleteMessage(peer, sentID, 20)
+			}
+			return
+		}
+	}
+
+	isCancel, _ := telegram.MatchCancelCommand(text, b.botUsername)
+
+	// Dispatch commands - all check against current bot username
 	switch {
-	case telegram.MatchCommand(text, telegram.BotCommands.Leech):
+	case telegram.MatchCommand(text, telegram.BotCommands.Leech, b.botUsername):
 		isZip := strings.Contains(strings.ToLower(text), "zip") && !strings.Contains(strings.ToLower(text), "unzip")
 		isUnzip := strings.Contains(strings.ToLower(text), "unzip")
 		if b.leechHandler != nil {
 			b.leechHandler(ctx, peer, msgCtx, isZip, isUnzip)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Ytdl):
+	case telegram.MatchCommand(text, telegram.BotCommands.Ytdl, b.botUsername):
 		if b.ytdlHandler != nil {
 			b.ytdlHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Status):
+	case telegram.MatchCommand(text, telegram.BotCommands.Status, b.botUsername):
 		if b.statusHandler != nil {
 			b.statusHandler(ctx, peer, msgCtx)
 		}
@@ -414,83 +506,83 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		if b.cancelHandler != nil {
 			b.cancelHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.CancelAll):
+	case telegram.MatchCommand(text, telegram.BotCommands.CancelAll, b.botUsername):
 		if b.cancelAllHandler != nil {
 			b.cancelAllHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.UserSetting):
+	case telegram.MatchCommand(text, telegram.BotCommands.UserSetting, b.botUsername):
 		if b.settingsHandler != nil {
 			b.settingsHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.BotSetting):
+	case telegram.MatchCommand(text, telegram.BotCommands.BotSetting, b.botUsername):
 		if b.bsettingHandler != nil {
 			b.bsettingHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Authorize):
+	case telegram.MatchCommand(text, telegram.BotCommands.Authorize, b.botUsername):
 		if b.authHandler != nil {
 			b.authHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.UnAuthorize):
+	case telegram.MatchCommand(text, telegram.BotCommands.UnAuthorize, b.botUsername):
 		if b.unauthHandler != nil {
 			b.unauthHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.AddSudo):
+	case telegram.MatchCommand(text, telegram.BotCommands.AddSudo, b.botUsername):
 		if b.addSudoHandler != nil {
 			b.addSudoHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.RmSudo):
+	case telegram.MatchCommand(text, telegram.BotCommands.RmSudo, b.botUsername):
 		if b.rmSudoHandler != nil {
 			b.rmSudoHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.AddPremium):
+	case telegram.MatchCommand(text, telegram.BotCommands.AddPremium, b.botUsername):
 		if b.addPremHandler != nil {
 			b.addPremHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.RmPremium):
+	case telegram.MatchCommand(text, telegram.BotCommands.RmPremium, b.botUsername):
 		if b.rmPremHandler != nil {
 			b.rmPremHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Premium):
+	case telegram.MatchCommand(text, telegram.BotCommands.Premium, b.botUsername):
 		if b.checkPremHandler != nil {
 			b.checkPremHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Help):
+	case telegram.MatchCommand(text, telegram.BotCommands.Help, b.botUsername):
 		if b.helpHandler != nil {
 			b.helpHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Ping):
+	case telegram.MatchCommand(text, telegram.BotCommands.Ping, b.botUsername):
 		if b.pingHandler != nil {
 			b.pingHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Stats):
+	case telegram.MatchCommand(text, telegram.BotCommands.Stats, b.botUsername):
 		if b.statsHandler != nil {
 			b.statsHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Log):
+	case telegram.MatchCommand(text, telegram.BotCommands.Log, b.botUsername):
 		if b.logHandler != nil {
 			b.logHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Restart):
+	case telegram.MatchCommand(text, telegram.BotCommands.Restart, b.botUsername):
 		if b.restartHandler != nil {
 			b.restartHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Speedtest):
+	case telegram.MatchCommand(text, telegram.BotCommands.Speedtest, b.botUsername):
 		if b.speedtestHandler != nil {
 			b.speedtestHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.MediaInfo):
+	case telegram.MatchCommand(text, telegram.BotCommands.MediaInfo, b.botUsername):
 		if b.mediaInfoHandler != nil {
 			b.mediaInfoHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Broadcast):
+	case telegram.MatchCommand(text, telegram.BotCommands.Broadcast, b.botUsername):
 		if b.broadcastHandler != nil {
 			b.broadcastHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Imdb):
+	case telegram.MatchCommand(text, telegram.BotCommands.Imdb, b.botUsername):
 		if b.imdbHandler != nil {
 			b.imdbHandler(ctx, peer, msgCtx)
 		}
-	case telegram.MatchCommand(text, telegram.BotCommands.Anime):
+	case telegram.MatchCommand(text, telegram.BotCommands.Anime, b.botUsername):
 		if b.animeHandler != nil {
 			b.animeHandler(ctx, peer, msgCtx)
 		}
@@ -505,7 +597,7 @@ func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuer
 	}
 
 	switch {
-	case strings.HasPrefix(data, "stats") || strings.HasPrefix(data, "wzmlx"):
+	case strings.HasPrefix(data, "stats") || strings.HasPrefix(data, "wzmlx") || strings.HasPrefix(data, "start_"):
 		if b.statsCbHandler != nil {
 			b.statsCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data, cb.UserID)
 		}
@@ -597,6 +689,7 @@ func (b *BotApp) Start(ctx context.Context) error {
 		botSelf, _ := b.client.Self(ctx)
 		if botSelf != nil {
 			b.botUsername = botSelf.Username
+			telegram.SetBotUsername(botSelf.Username)
 			uname := botSelf.Username
 			if uname == "" {
 				uname = botSelf.FirstName
@@ -623,9 +716,105 @@ func (b *BotApp) Start(ctx context.Context) error {
 		_ = ext.DB.LoadAllUsers(b.userMap)
 		log.Println("[AZML-Go Bot Client] AZML-Go started and listening for commands!")
 
+		// Trigger startup notification
+		go b.sendStartupNotification(ctx)
+
 		<-ctx.Done()
 		return ctx.Err()
 	})
+}
+
+func (b *BotApp) sendStartupNotification(ctx context.Context) {
+	time.Sleep(1 * time.Second)
+	cfg := config.Get()
+	now := time.Now()
+	dateStr := now.Format("02/01/06")
+	timeStr := now.Format("03:04:05 PM")
+	timz := "Asia/Kolkata"
+
+	// 1. Check if .restartmsg exists
+	restartData, err := os.ReadFile(".restartmsg")
+	if err == nil && len(restartData) > 0 {
+		_ = os.Remove(".restartmsg")
+		parts := strings.Fields(string(restartData))
+		if len(parts) >= 2 {
+			chatID, _ := strconv.ParseInt(parts[0], 10, 64)
+			msgID, _ := strconv.Atoi(parts[1])
+			if chatID != 0 && msgID != 0 {
+				restartSuccessText := fmt.Sprintf("⌬ <b><i>Restarted Successfully!</i></b>\n"+
+					"┠ <b>Date:</b> %s\n"+
+					"┠ <b>Time:</b> %s\n"+
+					"┠ <b>TimeZone:</b> %s\n"+
+					"┖ <b>Version:</b> <code>1.0.0</code>", dateStr, timeStr, timz)
+
+				botToken := cfg.BotToken
+				if botToken != "" {
+					url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken)
+					payload := map[string]interface{}{
+						"chat_id":    chatID,
+						"message_id": msgID,
+						"text":       restartSuccessText,
+						"parse_mode": "HTML",
+					}
+					body, _ := json.Marshal(payload)
+					_, _ = http.Post(url, "application/json", bytes.NewReader(body))
+				}
+				return
+			}
+		}
+	}
+
+	// 2. Otherwise send Bot Started Successfully notification to OWNER_ID and LEECH_LOG_ID
+	startMsg := fmt.Sprintf("⌬ <b><i>Bot Started Successfully!</i></b>\n"+
+		"┠ <b>Date:</b> %s\n"+
+		"┠ <b>Time:</b> %s\n"+
+		"┠ <b>TimeZone:</b> %s\n"+
+		"┖ <b>Version:</b> <code>1.0.0</code>", dateStr, timeStr, timz)
+
+	botToken := cfg.BotToken
+	if botToken == "" {
+		botToken = os.Getenv("BOT_TOKEN")
+	}
+	if botToken == "" {
+		log.Println("[AZML-Go Bot Client] Warning: BOT_TOKEN is empty, cannot send startup notification via Bot API")
+		return
+	}
+
+	sendViaBotAPI := func(targetID int64) {
+		if targetID == 0 {
+			return
+		}
+		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+		payload := map[string]interface{}{
+			"chat_id":                  targetID,
+			"text":                     startMsg,
+			"parse_mode":               "HTML",
+			"disable_web_page_preview": true,
+		}
+		body, _ := json.Marshal(payload)
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[AZML-Go Bot Client] Error sending startup message to %d: %v", targetID, err)
+			return
+		}
+		defer resp.Body.Close()
+		var res struct {
+			Ok          bool   `json:"ok"`
+			Description string `json:"description"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&res) == nil {
+			if res.Ok {
+				log.Printf("[AZML-Go Bot Client] Startup notification sent to %d successfully!", targetID)
+			} else {
+				log.Printf("[AZML-Go Bot Client] Failed to send startup notification to %d: %s", targetID, res.Description)
+			}
+		}
+	}
+
+	log.Printf("[AZML-Go Bot Client] Triggering startup notification (LeechLog: %d)...", cfg.LeechLogID)
+	if cfg.LeechLogID != 0 {
+		sendViaBotAPI(cfg.LeechLogID)
+	}
 }
 
 func (b *BotApp) registerBotCommands(ctx context.Context) {
@@ -912,7 +1101,8 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 			if strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") {
 				caption := strings.ToLower(strings.TrimSpace(m.Message))
 				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
-				if ext.IsPendingThumbSession(senderID) || isThumbCmd {
+				// Only intercept if explicit thumb command or active pending session in this chat without command prefix
+				if isThumbCmd || (ext.IsPendingThumbSession(senderID, chatID) && !strings.HasPrefix(caption, "/")) {
 					ext.ClearPendingThumbSession(senderID)
 					_ = os.MkdirAll("Thumbnails", 0755)
 					destThumb := fmt.Sprintf("Thumbnails/%d.jpg", senderID)
@@ -961,7 +1151,8 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 	if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 		caption := strings.ToLower(strings.TrimSpace(m.Message))
 		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
-		if ext.IsPendingThumbSession(senderID) || isThumbCmd {
+		// Only intercept if explicit thumb command or active pending session in this chat without command prefix
+		if isThumbCmd || (ext.IsPendingThumbSession(senderID, chatID) && !strings.HasPrefix(caption, "/")) {
 			ext.ClearPendingThumbSession(senderID)
 			if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
 				_ = os.MkdirAll("Thumbnails", 0755)
@@ -994,3 +1185,99 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 
 	return false
 }
+
+func (b *BotApp) applyUserSettingValue(ctx context.Context, peer tg.InputPeerClass, u *types.UserSettings, key, val string, promptMsgID int) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return
+	}
+	var fieldName string
+	switch key {
+	case "lprefix":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") {
+			u.Prefix = ""
+			val = "Cleared"
+		} else {
+			u.Prefix = val
+		}
+		fieldName = "Leech Prefix"
+	case "lsuffix":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") {
+			u.Suffix = ""
+			val = "Cleared"
+		} else {
+			u.Suffix = val
+		}
+		fieldName = "Leech Suffix"
+	case "lcaption":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") || strings.EqualFold(val, "default") {
+			u.Caption = ""
+			val = "Default"
+		} else {
+			u.Caption = val
+		}
+		fieldName = "Leech Caption"
+	case "lremname_auto":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") {
+			u.RemnameAuto = ""
+			val = "Cleared"
+		} else {
+			u.RemnameAuto = val
+		}
+		fieldName = "AutoRename Template"
+	case "lremname_regex":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") {
+			u.RemnameRegex = ""
+			val = "Cleared"
+		} else {
+			u.RemnameRegex = val
+		}
+		fieldName = "Regex Remname"
+	case "ldump":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") {
+			u.DumpChatID = 0
+			val = "Cleared"
+		} else {
+			id, _ := strconv.ParseInt(val, 10, 64)
+			u.DumpChatID = id
+		}
+		fieldName = "Leech Dump Channel"
+	case "lmeta":
+		if strings.EqualFold(val, "clear") || strings.EqualFold(val, "none") {
+			if u.Metadata != nil {
+				delete(u.Metadata, "all")
+			}
+			val = "Cleared"
+		} else {
+			if u.Metadata == nil {
+				u.Metadata = make(map[string]string)
+			}
+			u.Metadata["all"] = val
+		}
+		fieldName = "Leech Metadata"
+	case "split_size":
+		sizeStr := strings.ToUpper(val)
+		maxSplit := config.GetMaxSplitSize()
+		var bytes int64
+		if strings.HasSuffix(sizeStr, "GB") {
+			f, _ := strconv.ParseFloat(strings.TrimSuffix(sizeStr, "GB"), 64)
+			bytes = int64(f * 1024 * 1024 * 1024)
+		} else if strings.HasSuffix(sizeStr, "MB") {
+			f, _ := strconv.ParseFloat(strings.TrimSuffix(sizeStr, "MB"), 64)
+			bytes = int64(f * 1024 * 1024)
+		} else {
+			bytes, _ = strconv.ParseInt(sizeStr, 10, 64)
+		}
+		if bytes > maxSplit || bytes <= 0 {
+			bytes = maxSplit
+		}
+		u.SplitSize = bytes
+		fieldName = "Leech Split Size"
+		val = ext.GetReadableFileSize(u.SplitSize)
+	}
+
+	_ = ext.DB.SaveUser(u)
+	confirmText := fmt.Sprintf("✅ <b>%s</b> updated to: <code>%s</code>", fieldName, val)
+	_, _ = b.sender.SendMessage(ctx, peer, confirmText, 0, nil)
+}
+

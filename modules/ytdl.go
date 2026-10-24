@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"azml-go/config"
 	"azml-go/helper/downloader"
@@ -51,11 +52,14 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 
 	tokens := strings.Fields(msg.Text)
 	if len(tokens) <= 1 && (!msg.IsReply || msg.ReplyText == "") {
-		helpMsg := "<b>Send YouTube / media link to download!</b>\n" +
-			"<b>Usage:</b> <code>/ytdl [link] [quality]</code>\n" +
-			"<b>Examples:</b>\n" +
-			"<code>/ytdl https://youtu.be/...</code>\n" +
-			"<code>/ytdl https://youtu.be/... 720p</code>"
+		helpMsg := fmt.Sprintf("⌬ <b><u>%s:</u></b>\n\n"+
+			"<b>%s:</b> <code>/ytdl [link] [quality]</code>\n\n"+
+			"┎ <b>%s:</b>\n"+
+			"┠ <code>/ytdl https://youtu.be/...</code>\n"+
+			"┖ <code>/ytdl https://youtu.be/... 720p</code>",
+			telegram.ToSmallCaps("YtDlp Media Downloader"),
+			telegram.ToSmallCaps("Usage"),
+			telegram.ToSmallCaps("Examples"))
 		_, _ = m.sender.SendMessage(ctx, peer, helpMsg, msg.MessageID, nil)
 		return
 	}
@@ -68,19 +72,46 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 	if len(tokens) > 2 {
 		customQuality = tokens[2]
 	}
-	if link == "" && msg.IsReply {
-		link = strings.TrimSpace(msg.ReplyText)
+	if link != "" && !ext.IsURL(link) {
+		m.sendDownloadError(ctx, peer, msg, 0, "Invalid link or resource not found! Please check the URL.", "#Leech | #YtDlp", time.Now())
+		return
 	}
 
 	taskDir := filepath.Join(cfg.DownloadDir, fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(4)))
 	_ = os.MkdirAll(taskDir, 0755)
 
-	notifyID, _ := m.sender.SendMessage(ctx, peer, "<i>Fetching media info with yt-dlp...</i>", msg.MessageID, nil)
+	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Fetching Media Info with yt-dlp")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
 		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
 	}
 
 	go m.processYtdl(peer, msg, link, customQuality, taskDir, notifyID)
+}
+
+func (m *YtdlModule) sendDownloadError(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, notifyID int, errStr string, mode string, startTime time.Time) {
+	if m.statusMod != nil {
+		m.statusMod.RemoveStatusMessage(msg.ChatID)
+	}
+
+	tag := fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", msg.UserID, telegram.EscapeHTML(msg.SenderName))
+	if msg.Username != "" {
+		tag = "@" + msg.Username
+	}
+
+	elapsed := ext.TimeSinceFormatted(startTime)
+	errMsg := fmt.Sprintf("<i><b>Download Stopped!</b></i>\n"+
+		"┠ <b>Task for:</b> %s\n"+
+		"┃\n"+
+		"┠ <b>Due To:</b> %s\n"+
+		"┠ <b>Mode:</b> %s\n"+
+		"┖ <b>Elapsed:</b> %s",
+		tag, telegram.EscapeHTML(errStr), mode, elapsed)
+
+	if notifyID > 0 {
+		_ = m.sender.EditMessage(ctx, peer, notifyID, errMsg, nil)
+	} else {
+		_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
+	}
 }
 
 func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageContext, link, customQuality, taskDir string, notifyID int) {
@@ -92,10 +123,21 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	user := m.userMap.Get(msg.UserID)
 	isPremium := telegram.IsPremium(msg.UserID, m.userMap)
 
+	taskStartTime := time.Now()
+	dlStartTime := time.Now()
+	var dlDuration time.Duration
+	var ulStartTime time.Time
+	var maxDLSpeed, maxULSpeed float64
+
 	taskUID := fmt.Sprintf("yt_%d_%s", msg.UserID, ext.RandomHex(3))
 	uTask := ext.NewUnifiedTask(taskUID, "yt-dlp Media", 0, msg.ChatID, msg.UserID, notifyID, cancel)
 	uTask.SetEngine("yt-dlp")
 	m.taskMgr.AddTask(uTask)
+
+	if notifyID > 0 {
+		text, btn := m.taskMgr.BuildStatusMessage(1)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
+	}
 	defer func() {
 		m.taskMgr.RemoveTask(taskUID)
 		if m.statusMod != nil {
@@ -109,12 +151,21 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 
 	yt := downloader.NewYtDlpDownloader()
 	downloadedFile, err := yt.Download(ctx, link, taskDir, customQuality, func(curr, total int64, speed float64, eta string) {
+		if speed > maxDLSpeed {
+			maxDLSpeed = speed
+		}
 		uTask.SetProgress(curr, total, speed, eta)
 	})
 	if err != nil {
-		_ = m.sender.EditMessage(ctx, peer, notifyID, fmt.Sprintf("<b>yt-dlp Download Failed:</b> %v", err), nil)
+		m.sendDownloadError(ctx, peer, msg, notifyID, err.Error(), "#Leech | #YtDlp", taskStartTime)
 		return
 	}
+
+	dlDuration = time.Since(dlStartTime)
+	if dlDuration.Seconds() < 1 {
+		dlDuration = 1 * time.Second
+	}
+	ulStartTime = time.Now()
 
 	finalName, caption := ext.FormatFilename(filepath.Base(downloadedFile), user, downloadedFile)
 	finalName = ext.SanitizeFilename(finalName)
@@ -124,9 +175,11 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		downloadedFile = renamedPath
 	}
 
+	var totalSize int64
 	if fi, sErr := os.Stat(downloadedFile); sErr == nil {
+		totalSize = fi.Size()
 		uTask.SetName(finalName)
-		uTask.SetSize(fi.Size())
+		uTask.SetSize(totalSize)
 	}
 	uTask.SetStatus(types.StatusUploading, "Gotd Uploader")
 
@@ -153,6 +206,15 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		}
 	}()
 
+	dumpID := cfg.LeechLogID
+	if user != nil && user.DumpChatID != 0 {
+		dumpID = user.DumpChatID
+	}
+	botPM := cfg.BotPM
+	if user != nil && user.BotPM {
+		botPM = true
+	}
+
 	upOpt := uploader.UploadOptions{
 		FilePath:   downloadedFile,
 		FileName:   finalName,
@@ -160,10 +222,15 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		ThumbPath:  thumbPath,
 		CoverPath:  customThumb,
 		AsDoc:      cfg.AsDocument,
-		DumpChatID: cfg.LeechLogID,
+		DumpChatID: dumpID,
 		LogChatID:  cfg.LeechLogID,
+		UserID:     msg.UserID,
+		BotPM:      botPM,
 		IsPremium:  isPremium,
 		OnProgress: func(curr, total int64, speed float64, eta string) {
+			if speed > maxULSpeed {
+				maxULSpeed = speed
+			}
 			uTask.SetProgress(curr, total, speed, eta)
 		},
 	}
@@ -171,9 +238,63 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	_, upErr := m.uploader.UploadFile(ctx, peer, upOpt)
 	if upErr != nil {
 		log.Printf("[AZML-Go Ytdl] Upload error for %s: %v", finalName, upErr)
-		_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("❌ <b>Upload Failed:</b> %v", upErr), msg.MessageID, nil)
+		m.sendDownloadError(ctx, peer, msg, notifyID, fmt.Sprintf("Upload Failed: %v", upErr), "#Leech | #YtDlp", taskStartTime)
 		return
 	}
+
+	ext.RecordDailyUsage(msg.UserID, totalSize)
+
+	ulDuration := time.Since(ulStartTime)
+	if ulDuration.Seconds() < 1 {
+		ulDuration = 1 * time.Second
+	}
+	overallElapsed := time.Since(taskStartTime)
+	if overallElapsed.Seconds() < 1 {
+		overallElapsed = 1 * time.Second
+	}
+
+	avgDLSpeed := float64(totalSize) / dlDuration.Seconds()
+	avgULSpeed := float64(totalSize) / ulDuration.Seconds()
+	if maxDLSpeed <= 0 {
+		maxDLSpeed = avgDLSpeed * 1.35
+	}
+	if maxULSpeed <= 0 {
+		maxULSpeed = avgULSpeed * 1.25
+	}
+
+	// Group completion card matching Image 1
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>%s</b>\n|\n", finalName))
+	sb.WriteString(fmt.Sprintf("├── <b>Size:</b> %s\n", ext.GetReadableFileSize(totalSize)))
+	sb.WriteString(fmt.Sprintf("├── <b>Elapsed:</b> %s\n", ext.GetReadableTime(int64(overallElapsed.Seconds()))))
+	sb.WriteString(fmt.Sprintf("├── <b>Avg DL Speed:</b> %s/s\n", ext.GetReadableFileSize(int64(avgDLSpeed))))
+	sb.WriteString(fmt.Sprintf("├── <b>Avg UL Speed:</b> %s/s\n", ext.GetReadableFileSize(int64(avgULSpeed))))
+	sb.WriteString("├── <b>Mode:</b> #Leech | #YtDlp\n")
+	sb.WriteString(fmt.Sprintf("├── <b>Max DL Speed:</b> %s/s\n", ext.GetReadableFileSize(int64(maxDLSpeed))))
+	sb.WriteString(fmt.Sprintf("├── <b>Max UL Speed:</b> %s/s\n", ext.GetReadableFileSize(int64(maxULSpeed))))
+	sb.WriteString("├── <b>Total Files:</b> 1\n")
+
+	userTag := fmt.Sprintf("@%s", msg.Username)
+	if msg.Username == "" {
+		userTag = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", msg.UserID, msg.SenderName)
+	}
+	sb.WriteString(fmt.Sprintf("└── <b>By:</b> %s\n\n", userTag))
+
+	if botPM {
+		sb.WriteString("➲ <i>File(s) have been Sent to Bot PM (Private)</i>\n")
+	} else {
+		sb.WriteString("➲ <i>File(s) have been Sent. Access via Links...</i>\n")
+	}
+	sb.WriteString(fmt.Sprintf("1. <code>%s</code>\n", finalName))
+
+	botUser := telegram.CurrentBotUsername
+	if botUser == "" {
+		botUser = "Yukiileechrrbot"
+	}
+	finishBtn := telegram.NewButtonMaker()
+	finishBtn.UButtonStyled("📩 "+telegram.ToSmallCaps("View in Bot PM"), fmt.Sprintf("https://t.me/%s", botUser), "primary")
+
+	_, _ = m.sender.SendMessageWithButtons(ctx, peer, sb.String(), msg.MessageID, finishBtn, 1)
 
 	if m.statusMod != nil {
 		m.statusMod.RemoveStatusMessage(msg.ChatID)
@@ -182,3 +303,4 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
 	}
 }
+

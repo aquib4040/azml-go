@@ -31,13 +31,17 @@ func NewDirectDownloader() *DirectDownloader {
 	}
 }
 
-func (d *DirectDownloader) Download(ctx context.Context, link, outPath string, onProgress func(cur, total int64)) error {
+func (d *DirectDownloader) Download(ctx context.Context, link, outPath string, onProgress func(cur, total int64, speed float64, eta string)) error {
 	// Primary: Use Aria2c with 16 connections
 	aria := GetAria2Client()
 	dir, filename := filepath.Split(outPath)
 	if gid, err := aria.AddURI(link, dir, filename, nil); err == nil {
 		task := NewAria2DownloadTask(gid, filename, dir, 0, 0, 0)
-		_, pollErr := task.PollUntilComplete(ctx, onProgress)
+		_, pollErr := task.PollUntilComplete(ctx, func(c, t int64) {
+			if onProgress != nil {
+				onProgress(c, t, task.Speed(), task.ETA())
+			}
+		})
 		if pollErr == nil {
 			return nil
 		}
@@ -72,6 +76,7 @@ func (d *DirectDownloader) Download(ctx context.Context, link, outPath string, o
 
 	buf := make([]byte, 64*1024)
 	lastReport := time.Now()
+	var lastCurrent int64
 
 	for {
 		select {
@@ -87,8 +92,20 @@ func (d *DirectDownloader) Download(ctx context.Context, link, outPath string, o
 			}
 			current += int64(n)
 			if onProgress != nil && time.Since(lastReport) >= 1*time.Second {
-				onProgress(current, total)
-				lastReport = time.Now()
+				now := time.Now()
+				elapsed := now.Sub(lastReport).Seconds()
+				speed := float64(0)
+				if elapsed > 0 {
+					speed = float64(current-lastCurrent) / elapsed
+				}
+				eta := "-"
+				if speed > 0 && total > current {
+					rem := total - current
+					eta = ext.GetReadableTime(int64(float64(rem) / speed))
+				}
+				onProgress(current, total, speed, eta)
+				lastReport = now
+				lastCurrent = current
 			}
 		}
 		if rErr != nil {
@@ -100,7 +117,7 @@ func (d *DirectDownloader) Download(ctx context.Context, link, outPath string, o
 	}
 
 	if onProgress != nil {
-		onProgress(current, total)
+		onProgress(current, total, 0, "-")
 	}
 	return nil
 }

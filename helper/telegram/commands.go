@@ -177,6 +177,14 @@ func InitCommands() {
 	}
 }
 
+var (
+	CurrentBotUsername string
+)
+
+func SetBotUsername(u string) {
+	CurrentBotUsername = strings.TrimPrefix(strings.TrimSpace(u), "@")
+}
+
 func MatchCommand(text string, targets []string, botUsername ...string) bool {
 	if !strings.HasPrefix(text, "/") {
 		return false
@@ -186,12 +194,21 @@ func MatchCommand(text string, targets []string, botUsername ...string) bool {
 		return false
 	}
 	cmd := strings.TrimPrefix(parts[0], "/")
+
+	ourBot := CurrentBotUsername
+	if len(botUsername) > 0 && botUsername[0] != "" {
+		ourBot = strings.TrimPrefix(strings.TrimSpace(botUsername[0]), "@")
+	}
+
 	if atIdx := strings.Index(cmd, "@"); atIdx != -1 {
 		botTarget := cmd[atIdx+1:]
-		if len(botUsername) > 0 && botUsername[0] != "" {
-			if !strings.EqualFold(botTarget, botUsername[0]) {
+		if ourBot != "" {
+			if !strings.EqualFold(botTarget, ourBot) {
 				return false
 			}
+		} else {
+			// If our bot username is not set yet, but an explicit @bot tag is given, do not accept foreign commands
+			return false
 		}
 		cmd = cmd[:atIdx]
 	}
@@ -213,12 +230,20 @@ func (c *Commands) IsAnyCommand(text string, botUsername ...string) bool {
 		return false
 	}
 	cmdToken := strings.TrimPrefix(parts[0], "/")
+
+	ourBot := CurrentBotUsername
+	if len(botUsername) > 0 && botUsername[0] != "" {
+		ourBot = strings.TrimPrefix(strings.TrimSpace(botUsername[0]), "@")
+	}
+
 	if atIdx := strings.Index(cmdToken, "@"); atIdx != -1 {
 		botTarget := cmdToken[atIdx+1:]
-		if len(botUsername) > 0 && botUsername[0] != "" {
-			if !strings.EqualFold(botTarget, botUsername[0]) {
+		if ourBot != "" {
+			if !strings.EqualFold(botTarget, ourBot) {
 				return false
 			}
+		} else {
+			return false
 		}
 		cmdToken = cmdToken[:atIdx]
 	}
@@ -250,7 +275,7 @@ func MatchSingleCommand(text, target string, botUsername ...string) bool {
 }
 
 // MatchCancelCommand checks if text is a cancel command (/cancel, /cancel_GID, /del, /del_GID) and extracts the GID
-func MatchCancelCommand(text string) (bool, string) {
+func MatchCancelCommand(text string, botUsername ...string) (bool, string) {
 	if !strings.HasPrefix(text, "/") {
 		return false, ""
 	}
@@ -259,7 +284,21 @@ func MatchCancelCommand(text string) (bool, string) {
 		return false, ""
 	}
 	cmdToken := strings.TrimPrefix(fields[0], "/")
+
+	ourBot := CurrentBotUsername
+	if len(botUsername) > 0 && botUsername[0] != "" {
+		ourBot = strings.TrimPrefix(strings.TrimSpace(botUsername[0]), "@")
+	}
+
 	if atIdx := strings.Index(cmdToken, "@"); atIdx != -1 {
+		botTarget := cmdToken[atIdx+1:]
+		if ourBot != "" {
+			if !strings.EqualFold(botTarget, ourBot) {
+				return false, ""
+			}
+		} else {
+			return false, ""
+		}
 		cmdToken = cmdToken[:atIdx]
 	}
 

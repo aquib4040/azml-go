@@ -138,15 +138,19 @@ func (m *TaskManager) BuildStatusMessage(page int) (string, *telegram.ButtonMake
 	if totalTasks == 0 {
 		mem := GetMemoryStats()
 		uptime := TimeSinceFormatted(BotStartTime)
-		noTaskMsg := fmt.Sprintf("<i>No Active Tasks!</i>\n\n"+
-			"⌬ <b><i>Bot Stats</i></b>\n"+
-			"┠ <b>RAM:</b> <code>%.1f%%</code> | <b>App RAM:</b> <code>%.1f MB</code>\n"+
-			"┠ <b>Free:</b> <code>%s</code>\n"+
-			"┖ <b>UPTIME:</b> <code>%s</code>",
-			mem.OSPercent, mem.AppRAMMB, mem.OSFree, uptime)
+		noTaskMsg := fmt.Sprintf("<i>%s</i>\n\n"+
+			"⌬ <b><u>%s</u></b>\n"+
+			"┠ <b>%s:</b> <code>%.1f%%</code> | <b>%s:</b> <code>%.1f MB</code>\n"+
+			"┠ <b>%s:</b> <code>%s</code>\n"+
+			"┖ <b>%s:</b> <code>%s</code>",
+			telegram.ToSmallCaps("No Active Tasks Running!"),
+			telegram.ToSmallCaps("Bot Stats"),
+			telegram.ToSmallCaps("System RAM"), mem.OSPercent, telegram.ToSmallCaps("App RAM"), mem.AppRAMMB,
+			telegram.ToSmallCaps("Disk Free"), mem.OSFree,
+			telegram.ToSmallCaps("Uptime"), uptime)
 		btn := telegram.NewButtonMaker()
-		btn.IButton("🔄 Refresh", "status ref 1")
-		btn.IButton("❌ Close", "status close")
+		btn.IButtonStyled("🔄 "+telegram.ToSmallCaps("Refresh"), "status ref 1", "primary")
+		btn.Row()
 		return noTaskMsg, btn
 	}
 
@@ -187,7 +191,6 @@ func (m *TaskManager) BuildStatusMessage(page int) (string, *telegram.ButtonMake
 	}
 
 	var sb strings.Builder
-	cancelCmd := "cancel" + cfg.CmdSuffix
 
 	for i := start; i < end; i++ {
 		t := tasks[i]
@@ -195,30 +198,32 @@ func (m *TaskManager) BuildStatusMessage(page int) (string, *telegram.ButtonMake
 		bar := makeProgressBar(pct)
 		elapsed := TimeSinceFormatted(t.StartTime())
 
-		sb.WriteString(fmt.Sprintf("<b><i>%s</i></b>\n", SanitizeFilename(t.Name())))
-		sb.WriteString(fmt.Sprintf("┃ %s <code>%.1f%%</code>\n", bar, pct))
-		sb.WriteString(fmt.Sprintf("┠ <b>Processed:</b> <code>%s</code> of <code>%s</code>\n", GetReadableFileSize(t.DownloadedBytes()), GetReadableFileSize(t.Size())))
-		sb.WriteString(fmt.Sprintf("┠ <b>Status:</b> %s | <b>ETA:</b> <code>%s</code>\n", t.Status(), t.ETA()))
-		sb.WriteString(fmt.Sprintf("┠ <b>Speed:</b> <code>%s/s</code> | <b>Elapsed:</b> <code>%s</code>\n", GetReadableFileSize(int64(t.Speed())), elapsed))
-		sb.WriteString(fmt.Sprintf("┠ <b>Engine:</b> <code>%s</code>\n", t.Engine()))
+		sb.WriteString(fmt.Sprintf("◈ <b>%s</b>\n", SanitizeFilename(t.Name())))
+		sb.WriteString(fmt.Sprintf("┃ [%s] <code>%.1f%%</code>\n", bar, pct))
+		sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%s</code> / <code>%s</code>\n", telegram.ToSmallCaps("Processed"), GetReadableFileSize(t.DownloadedBytes()), GetReadableFileSize(t.Size())))
+		sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <i>%s</i> | <b>%s:</b> <code>%s</code>\n", telegram.ToSmallCaps("Status"), t.Status(), telegram.ToSmallCaps("ETA"), t.ETA()))
+		sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%s/s</code> | <b>%s:</b> <code>%s</code>\n", telegram.ToSmallCaps("Speed"), GetReadableFileSize(int64(t.Speed())), telegram.ToSmallCaps("Elapsed"), elapsed))
+		sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%s</code>\n", telegram.ToSmallCaps("Engine"), t.Engine()))
 		uID := t.UserID()
 		if uID == 0 {
 			uID = cfg.OwnerID
 		}
-		sb.WriteString(fmt.Sprintf("┠ <b>User:</b> <code>User</code> | <b>ID:</b> <code>%d</code>\n", uID))
-		sb.WriteString(fmt.Sprintf("┖ <b>Cancel:</b> <code>/%s_%s</code>\n\n", cancelCmd, t.GID()))
+		sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%d</code>\n", telegram.ToSmallCaps("User ID"), uID))
+		sb.WriteString(fmt.Sprintf("┖ /cancel_%s\n\n", t.GID()))
 	}
 
 	mem := GetMemoryStats()
 	uptime := TimeSinceFormatted(BotStartTime)
 
-	sb.WriteString("⌬ <b><i>Bot Stats</i></b>\n")
-	sb.WriteString(fmt.Sprintf("┠ <b>Tasks:</b> <code>%d</code>\n", totalTasks))
-	sb.WriteString(fmt.Sprintf("┠ <b>RAM:</b> <code>%.1f%%</code> | <b>App RAM:</b> <code>%.1f MB</code>\n", mem.OSPercent, mem.AppRAMMB))
-	sb.WriteString(fmt.Sprintf("┠ <b>UPTIME:</b> <code>%s</code>\n", uptime))
-	sb.WriteString(fmt.Sprintf("┖ <b>DL:</b> <code>%s/s</code> | <b>UL:</b> <code>%s/s</code>", GetReadableFileSize(int64(totalDL)), GetReadableFileSize(int64(totalUL))))
+	sb.WriteString(fmt.Sprintf("⌬ <b><u>%s</u></b>\n", telegram.ToSmallCaps("Bot Status")))
+	sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%d</code>\n", telegram.ToSmallCaps("Active Tasks"), totalTasks))
+	sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%.1f%%</code> | <b>%s:</b> <code>%.1f MB</code>\n", telegram.ToSmallCaps("System RAM"), mem.OSPercent, telegram.ToSmallCaps("App RAM"), mem.AppRAMMB))
+	sb.WriteString(fmt.Sprintf("┠ <b>%s:</b> <code>%s</code>\n", telegram.ToSmallCaps("Uptime"), uptime))
+	sb.WriteString(fmt.Sprintf("┖ <b>%s:</b> <code>%s/s</code> | <b>%s:</b> <code>%s/s</code>", telegram.ToSmallCaps("DL Speed"), GetReadableFileSize(int64(totalDL)), telegram.ToSmallCaps("UL Speed"), GetReadableFileSize(int64(totalUL))))
 
 	btn := telegram.NewButtonMaker()
+
+	// Bottom action bar: Refresh only (or Pagination: Prev, Refresh/Pages, Next) with color buttons
 	if totalPages > 1 {
 		prevPage := page - 1
 		if prevPage < 1 {
@@ -229,13 +234,13 @@ func (m *TaskManager) BuildStatusMessage(page int) (string, *telegram.ButtonMake
 			nextPage = 1
 		}
 
-		btn.IButton("⫷", fmt.Sprintf("status page %d", prevPage))
-		btn.IButton(fmt.Sprintf("ᴘᴀɢᴇs %d/%d", page, totalPages), fmt.Sprintf("status ref %d", page))
-		btn.IButton("⫸", fmt.Sprintf("status page %d", nextPage))
-		btn.IButton("❌ Close", "status close")
+		btn.IButtonStyled("⫷", fmt.Sprintf("status page %d", prevPage), "primary")
+		btn.IButtonStyled(fmt.Sprintf("🔄 %s %d/%d", telegram.ToSmallCaps("Pages"), page, totalPages), fmt.Sprintf("status ref %d", page), "primary")
+		btn.IButtonStyled("⫸", fmt.Sprintf("status page %d", nextPage), "primary")
+		btn.Row()
 	} else {
-		btn.IButton("🔄 Refresh", "status ref 1")
-		btn.IButton("❌ Close", "status close")
+		btn.IButtonStyled("🔄 "+telegram.ToSmallCaps("Refresh"), fmt.Sprintf("status ref %d", page), "primary")
+		btn.Row()
 	}
 
 	return sb.String(), btn
@@ -248,17 +253,26 @@ func makeProgressBar(pct float64) string {
 	if pct > 100 {
 		pct = 100
 	}
-	totalBlocks := 10
-	filledBlocks := int((pct / 100.0) * float64(totalBlocks))
-
-	var b strings.Builder
-	for i := 0; i < filledBlocks; i++ {
-		b.WriteString("■")
+	totalBlocks := 12
+	cFull := int(pct / (100.0 / float64(totalBlocks)))
+	if cFull > totalBlocks {
+		cFull = totalBlocks
 	}
-	for i := filledBlocks; i < totalBlocks; i++ {
-		b.WriteString("□")
+	var sb strings.Builder
+	for i := 0; i < cFull; i++ {
+		sb.WriteString("■")
 	}
-	return b.String()
+	remainder := pct - float64(cFull)*(100.0/float64(totalBlocks))
+	parts := []string{"▤", "▥", "▦", "▧", "▨", "▩"}
+	partIdx := int((remainder / (100.0 / float64(totalBlocks))) * float64(len(parts)))
+	if cFull < totalBlocks && partIdx >= 0 && partIdx < len(parts) && remainder > 0.5 {
+		sb.WriteString(parts[partIdx])
+		cFull++
+	}
+	for i := cFull; i < totalBlocks; i++ {
+		sb.WriteString("□")
+	}
+	return sb.String()
 }
 
 // QueueTask implements types.DownloadTask for tasks in QueueDL or QueueUp states

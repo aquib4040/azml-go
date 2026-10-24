@@ -1,13 +1,16 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -168,9 +171,144 @@ func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass,
 	}
 	_, err := m.rawClient.MessagesEditMessage(ctx, req)
 	if err != nil {
+		if strings.Contains(err.Error(), "MESSAGE_NOT_MODIFIED") || strings.Contains(err.Error(), "context canceled") {
+			return nil
+		}
 		log.Printf("[AZML-Go Bot Client] Error editing message %d: %v", msgID, err)
 	}
 	return err
+}
+
+func PeerToChatID(peer tg.InputPeerClass) int64 {
+	if peer == nil {
+		return 0
+	}
+	switch p := peer.(type) {
+	case *tg.InputPeerUser:
+		return p.UserID
+	case *tg.InputPeerChannel:
+		if p.ChannelID > 0 {
+			s := fmt.Sprintf("-100%d", p.ChannelID)
+			val, _ := strconv.ParseInt(s, 10, 64)
+			return val
+		}
+		return p.ChannelID
+	case *tg.InputPeerChat:
+		if p.ChatID > 0 {
+			return -p.ChatID
+		}
+		return p.ChatID
+	}
+	return 0
+}
+
+var botAPIHTTPClient = &http.Client{Timeout: 8 * time.Second}
+
+func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
+	if btn == nil {
+		return m.SendMessage(ctx, peer, text, replyToID, nil)
+	}
+
+	botToken := os.Getenv("BOT_TOKEN")
+	chatID := PeerToChatID(peer)
+
+	if btn.HasStyle() && botToken != "" && chatID != 0 {
+		kbJSON := btn.BuildBotAPIKeyboard(cols)
+		payload := map[string]interface{}{
+			"chat_id":                  chatID,
+			"text":                     text,
+			"parse_mode":               "HTML",
+			"reply_markup":             json.RawMessage(kbJSON),
+			"disable_web_page_preview": true,
+		}
+		if replyToID != 0 {
+			payload["reply_to_message_id"] = replyToID
+		}
+		body, _ := json.Marshal(payload)
+		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			resp, rErr := botAPIHTTPClient.Do(req)
+			if rErr == nil {
+				defer resp.Body.Close()
+				var res struct {
+					Ok     bool `json:"ok"`
+					Result struct {
+						MessageID int `json:"message_id"`
+					} `json:"result"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&res) == nil && res.Ok {
+					return res.Result.MessageID, nil
+				}
+			}
+		}
+	}
+
+	return m.SendMessage(ctx, peer, text, replyToID, btn.BuildMenu(cols))
+}
+
+func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.InputPeerClass, msgID int, text string, btn *ButtonMaker, cols int) error {
+	if msgID <= 0 {
+		return nil
+	}
+	if btn == nil {
+		return m.EditMessage(ctx, peer, msgID, text, nil)
+	}
+
+	botToken := os.Getenv("BOT_TOKEN")
+	chatID := PeerToChatID(peer)
+
+	if btn.HasStyle() && botToken != "" && chatID != 0 {
+		kbJSON := btn.BuildBotAPIKeyboard(cols)
+		payload := map[string]interface{}{
+			"chat_id":                  chatID,
+			"message_id":               msgID,
+			"text":                     text,
+			"parse_mode":               "HTML",
+			"reply_markup":             json.RawMessage(kbJSON),
+			"disable_web_page_preview": true,
+		}
+		body, _ := json.Marshal(payload)
+		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken), bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			resp, rErr := botAPIHTTPClient.Do(req)
+			if rErr == nil {
+				defer resp.Body.Close()
+				var res struct {
+					Ok          bool   `json:"ok"`
+					Description string `json:"description"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&res) == nil {
+					if res.Ok || strings.Contains(strings.ToLower(res.Description), "not modified") {
+						return nil
+					}
+					// If the message is a photo/media message, editMessageText fails; edit caption instead!
+					if strings.Contains(strings.ToLower(res.Description), "no text in the message") {
+						capPayload := map[string]interface{}{
+							"chat_id":      chatID,
+							"message_id":   msgID,
+							"caption":      text,
+							"parse_mode":   "HTML",
+							"reply_markup": json.RawMessage(kbJSON),
+						}
+						cBody, _ := json.Marshal(capPayload)
+						cReq, cErr := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken), bytes.NewReader(cBody))
+						if cErr == nil {
+							cReq.Header.Set("Content-Type", "application/json")
+							cResp, crErr := botAPIHTTPClient.Do(cReq)
+							if crErr == nil {
+								cResp.Body.Close()
+								return nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return m.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(cols))
 }
 
 // DeleteMessage deletes messages for both PMs/basic groups and supergroups/channels
@@ -204,8 +342,44 @@ func (m *MessageSender) DeleteMessage(ctx context.Context, peer tg.InputPeerClas
 	return err
 }
 
-// SendPhotoFromURL fetches a photo from imageURL and sends it to Telegram as a native photo
-func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerClass, imageURL, caption string, replyToID int) (int, error) {
+// SendPhotoFromURLWithButtons sends a photo from URL with inline buttons via Bot API or MTProto
+func (m *MessageSender) SendPhotoFromURLWithButtons(ctx context.Context, peer tg.InputPeerClass, imageURL, caption string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
+	botToken := os.Getenv("BOT_TOKEN")
+	chatID := PeerToChatID(peer)
+
+	if botToken != "" && chatID != 0 {
+		payload := map[string]interface{}{
+			"chat_id":    chatID,
+			"photo":      imageURL,
+			"caption":    caption,
+			"parse_mode": "HTML",
+		}
+		if btn != nil {
+			payload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+		}
+		if replyToID != 0 {
+			payload["reply_to_message_id"] = replyToID
+		}
+		body, _ := json.Marshal(payload)
+		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", botToken), bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			resp, rErr := botAPIHTTPClient.Do(req)
+			if rErr == nil {
+				defer resp.Body.Close()
+				var res struct {
+					Ok     bool `json:"ok"`
+					Result struct {
+						MessageID int `json:"message_id"`
+					} `json:"result"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&res) == nil && res.Ok {
+					return res.Result.MessageID, nil
+				}
+			}
+		}
+	}
+
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, "GET", imageURL, nil)
 	if err != nil {
@@ -227,7 +401,7 @@ func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerC
 	}
 
 	u := uploader.NewUploader(m.rawClient)
-	inputFile, err := u.FromBytes(ctx, "speedtest.png", data)
+	inputFile, err := u.FromBytes(ctx, "cover.png", data)
 	if err != nil {
 		return 0, err
 	}
@@ -242,6 +416,9 @@ func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerC
 		Entities: entities,
 		RandomID: time.Now().UnixNano(),
 	}
+	if btn != nil {
+		mediaReq.ReplyMarkup = btn.BuildMenu(cols)
+	}
 	if replyToID != 0 {
 		mediaReq.ReplyTo = &tg.InputReplyToMessage{
 			ReplyToMsgID: replyToID,
@@ -254,6 +431,11 @@ func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerC
 		return 0, err
 	}
 	return ExtractMessageID(updates), nil
+}
+
+// SendPhotoFromURL fetches a photo from imageURL and sends it to Telegram as a native photo
+func (m *MessageSender) SendPhotoFromURL(ctx context.Context, peer tg.InputPeerClass, imageURL, caption string, replyToID int) (int, error) {
+	return m.SendPhotoFromURLWithButtons(ctx, peer, imageURL, caption, replyToID, nil, 1)
 }
 
 // SendLocalPhoto uploads a local photo file and sends it to Telegram as a native photo

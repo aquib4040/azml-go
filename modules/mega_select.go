@@ -49,10 +49,10 @@ func BuildMegaSelectionButtons(uid string) tg.ReplyMarkupClass {
 	}
 
 	b := telegram.NewButtonMaker()
-	b.UButton("Select Files", fmt.Sprintf("%s/app/files/%s", baseURL, uid))
-	b.IButton("Pincode", fmt.Sprintf("megasel pin %s %s", uid, pinCode))
-	b.IButton("Cancel", fmt.Sprintf("megasel cancel %s", uid))
-	b.IButton("Done Selecting", fmt.Sprintf("megasel done %s", uid))
+	b.UButtonStyled("📁 "+telegram.ToSmallCaps("Select Files"), fmt.Sprintf("%s/app/files/%s", baseURL, uid), "primary")
+	b.IButtonStyled("🔢 "+telegram.ToSmallCaps("Pincode"), fmt.Sprintf("megasel pin %s %s", uid, pinCode), "primary")
+	b.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), fmt.Sprintf("megasel cancel %s", uid), "danger")
+	b.IButtonStyled("✓ "+telegram.ToSmallCaps("Done Selecting"), fmt.Sprintf("megasel done %s", uid), "success")
 	return b.BuildMenu(2)
 }
 

@@ -147,7 +147,7 @@ func (m *AnimeModule) HandleAnime(ctx context.Context, peer tg.InputPeerClass, m
 
 		btn := telegram.NewButtonMaker()
 		if media.SiteURL != "" {
-			btn.UButton("🌸 Open on AniList", media.SiteURL)
+			btn.UButtonStyled("🌸 "+telegram.ToSmallCaps("Open on AniList"), media.SiteURL, "primary")
 		}
 
 		_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))

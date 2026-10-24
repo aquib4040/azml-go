@@ -87,6 +87,7 @@ func main() {
 	app.SetCancelHandlers(cancelMod.HandleCancel, cancelMod.HandleCancelAll, cancelMod.HandleCallback)
 	app.SetSettingsHandlers(settingsMod.HandleSettings, settingsMod.HandleCallback)
 	app.SetBotSettingsHandlers(botSetMod.HandleBotSettings, botSetMod.HandleCallback)
+	app.SetBotSettingsInputHandlers(botSetMod.HandleSessionValue, botSetMod.HandleSessionCancelled)
 	app.SetAuthorizeHandlers(
 		authMod.HandleAuthorize,
 		authMod.HandleUnauthorize,

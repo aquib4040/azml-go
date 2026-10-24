@@ -96,7 +96,7 @@ func (m *ImdbModule) HandleImdb(ctx context.Context, peer tg.InputPeerClass, msg
 
 					btn := telegram.NewButtonMaker()
 					if item.IMDbURL != "" {
-						btn.UButton("🎬 Open on IMDb", item.IMDbURL)
+						btn.UButtonStyled("🎬 "+telegram.ToSmallCaps("Open on IMDb"), item.IMDbURL, "primary")
 					}
 					_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))
 					return
@@ -139,7 +139,7 @@ func (m *ImdbModule) HandleImdb(ctx context.Context, peer tg.InputPeerClass, msg
 			name, year, item.VoteAverage, date, overview)
 
 		btn := telegram.NewButtonMaker()
-		btn.UButton("🔍 TMDb Page", fmt.Sprintf("https://www.themoviedb.org/%s/%d", "movie", item.ID))
+		btn.UButtonStyled("🔍 "+telegram.ToSmallCaps("TMDb Page"), fmt.Sprintf("https://www.themoviedb.org/%s/%d", "movie", item.ID), "primary")
 		_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))
 	}()
 }
