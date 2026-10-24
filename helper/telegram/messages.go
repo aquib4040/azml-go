@@ -171,7 +171,7 @@ func (m *MessageSender) EditMessage(ctx context.Context, peer tg.InputPeerClass,
 	}
 	_, err := m.rawClient.MessagesEditMessage(ctx, req)
 	if err != nil {
-		if strings.Contains(err.Error(), "MESSAGE_NOT_MODIFIED") || strings.Contains(err.Error(), "context canceled") {
+		if strings.Contains(err.Error(), "MESSAGE_NOT_MODIFIED") || strings.Contains(err.Error(), "MESSAGE_ID_INVALID") || strings.Contains(err.Error(), "context canceled") {
 			return nil
 		}
 		log.Printf("[AZML-Go Bot Client] Error editing message %d: %v", msgID, err)
