@@ -219,9 +219,13 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	}
 
 	thumbPath := ext.GenerateThumbnail(downloadedFile, customThumb)
+	coverPath := ext.GenerateVideoCover(downloadedFile, customThumb)
 	defer func() {
 		if thumbPath != "" && thumbPath != customThumb {
 			_ = os.Remove(thumbPath)
+		}
+		if coverPath != "" && coverPath != customThumb {
+			_ = os.Remove(coverPath)
 		}
 	}()
 
@@ -239,7 +243,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		FileName:   finalName,
 		Caption:    caption,
 		ThumbPath:  thumbPath,
-		CoverPath:  customThumb,
+		CoverPath:  coverPath,
 		AsDoc:      cfg.AsDocument,
 		DumpChatID: dumpID,
 		LogChatID:  cfg.LeechLogID,

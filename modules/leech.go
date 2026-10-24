@@ -1060,6 +1060,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			}
 		}
 		thumbPath := ext.GenerateThumbnail(curFile, customThumb)
+		coverPath := ext.GenerateVideoCover(curFile, customThumb)
 
 		// File Splitting
 		uTask.SetStatus(types.StatusSplitting, "7-Zip")
@@ -1108,7 +1109,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				FileName:   filepath.Base(part),
 				Caption:    partCaption,
 				ThumbPath:  thumbPath,
-				CoverPath:  customThumb,
+				CoverPath:  coverPath,
 				AsDoc:      opt.AsDoc || cfg.AsDocument,
 				DumpChatID: dumpID,
 				LogChatID:  cfg.LeechLogID,
@@ -1134,6 +1135,9 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 		if thumbPath != "" && thumbPath != customThumb {
 			_ = os.Remove(thumbPath)
+		}
+		if coverPath != "" && coverPath != customThumb {
+			_ = os.Remove(coverPath)
 		}
 		ext.RecordDailyUsage(msg.UserID, itemSize)
 	}

@@ -530,6 +530,17 @@ func uploadToTelegraph(filePath string) (string, error) {
 func GenerateThumbnail(filePath, customThumbPath string) string {
 	if customThumbPath != "" {
 		if _, err := os.Stat(customThumbPath); err == nil {
+			outThumb := filepath.Join(os.TempDir(), fmt.Sprintf("thumb_320_%s.jpg", RandomHex(4)))
+			cmd := exec.Command("ffmpeg",
+				"-hide_banner", "-loglevel", "error",
+				"-i", customThumbPath,
+				"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+				"-q:v", "2",
+				outThumb, "-y",
+			)
+			if cmd.Run() == nil {
+				return outThumb
+			}
 			return customThumbPath
 		}
 	}
@@ -559,3 +570,36 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 	}
 	return ""
 }
+
+func GenerateVideoCover(filePath, customThumbPath string) string {
+	if customThumbPath != "" {
+		if _, err := os.Stat(customThumbPath); err == nil {
+			return customThumbPath
+		}
+	}
+
+	details, err := ProbeMedia(filePath)
+	if err != nil || details.Duration == 0 {
+		return ""
+	}
+
+	outCover := filepath.Join(os.TempDir(), fmt.Sprintf("cover_hd_%s.jpg", RandomHex(4)))
+	captureSec := details.Duration / 4
+	if captureSec <= 0 {
+		captureSec = 1
+	}
+
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-ss", strconv.Itoa(captureSec),
+		"-i", filePath,
+		"-vframes", "1",
+		"-q:v", "2",
+		outCover, "-y",
+	)
+	if cmd.Run() == nil {
+		return outCover
+	}
+	return ""
+}
+

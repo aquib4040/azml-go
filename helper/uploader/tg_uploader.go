@@ -160,6 +160,61 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 	return fmt.Errorf("exceeded max retries (10) for part %d", partIndex)
 }
 
+func (u *TelegramUploader) uploadVideoCover(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, coverPath string) (tg.InputPhotoClass, error) {
+	if coverPath == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(coverPath); err != nil {
+		return nil, err
+	}
+
+	coverUp := uploader.NewUploader(client).WithPartSize(512 * 1024)
+	coverFile, err := coverUp.FromPath(ctx, coverPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload cover file: %w", err)
+	}
+
+	uploadReq := &tg.MessagesUploadMediaRequest{
+		Peer: peer,
+		Media: &tg.InputMediaUploadedPhoto{
+			File: coverFile,
+		},
+	}
+
+	var mediaRes tg.MessageMediaClass
+	var uploadErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		mediaRes, uploadErr = client.MessagesUploadMedia(ctx, uploadReq)
+		if uploadErr == nil {
+			break
+		}
+		if d, ok := tgerr.AsFloodWait(uploadErr); ok {
+			time.Sleep(d + 500*time.Millisecond)
+			continue
+		}
+		var fallbackPeer tg.InputPeerClass = &tg.InputPeerSelf{}
+		if client == u.botClient {
+			fallbackPeer = &tg.InputPeerEmpty{}
+		}
+		if uploadReq.Peer != fallbackPeer {
+			uploadReq.Peer = fallbackPeer
+			continue
+		}
+		break
+	}
+	if uploadErr != nil {
+		return nil, fmt.Errorf("messages.uploadMedia failed: %w", uploadErr)
+	}
+
+	if photoMedia, ok := mediaRes.(*tg.MessageMediaPhoto); ok {
+		if p, ok := photoMedia.Photo.(*tg.Photo); ok {
+			return p.AsInput(), nil
+		}
+	}
+
+	return nil, fmt.Errorf("unexpected media response type %T", mediaRes)
+}
+
 func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClass, opt UploadOptions) (*tg.UpdatesClass, error) {
 	fi, err := os.Stat(opt.FilePath)
 	if err != nil {
@@ -314,6 +369,11 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 	}
 
+	var attributes []tg.DocumentAttributeClass
+	extName := strings.ToLower(filepath.Ext(opt.FilePath))
+	isVideo := isVideoExt(extName) && !opt.AsDoc
+	isAudio := isAudioExt(extName) && !opt.AsDoc
+
 	var thumbFile tg.InputFileClass
 	// Upload Legacy Thumbnail (320x320)
 	if opt.ThumbPath != "" {
@@ -324,10 +384,21 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 	}
 
-	var attributes []tg.DocumentAttributeClass
-	extName := strings.ToLower(filepath.Ext(opt.FilePath))
-	isVideo := isVideoExt(extName) && !opt.AsDoc
-	isAudio := isAudioExt(extName) && !opt.AsDoc
+	var videoCover tg.InputPhotoClass
+	if isVideo {
+		coverPath := opt.CoverPath
+		if coverPath == "" {
+			coverPath = opt.ThumbPath
+		}
+		if coverPath != "" {
+			cov, cErr := u.uploadVideoCover(ctx, clientToUse, peer, coverPath)
+			if cErr == nil && cov != nil {
+				videoCover = cov
+			} else if cErr != nil {
+				log.Printf("[AZML-Go Uploader] Failed to upload video cover from %s: %v", coverPath, cErr)
+			}
+		}
+	}
 
 	attributes = append(attributes, &tg.DocumentAttributeFilename{
 		FileName: uploadName,
@@ -378,10 +449,16 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	inputMedia := &tg.InputMediaUploadedDocument{
 		File:       uploadedFile,
-		Thumb:      thumbFile,
 		MimeType:   mimeType,
 		Attributes: attributes,
 	}
+	if thumbFile != nil {
+		inputMedia.SetThumb(thumbFile)
+	}
+	if videoCover != nil {
+		inputMedia.SetVideoCover(videoCover)
+	}
+
 
 	plainCaption, captionEntities := telegram.ParseFormatting(opt.Caption)
 	if len(plainCaption) > 1024 {
