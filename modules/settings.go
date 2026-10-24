@@ -484,7 +484,7 @@ func (m *SettingsModule) buildLeechMenu(u *types.UserSettings, userName string) 
 	return text, btn
 }
 
-func (m *SettingsModule) buildThumbnailMenu(u *types.UserSettings) (string, *telegram.ButtonMaker) {
+func (m *SettingsModule) buildThumbnailMenu(u *types.UserSettings, banner ...string) (string, *telegram.ButtonMaker) {
 	status := "Not Exists"
 	exists := false
 	if u.CustomThumb != "" {
@@ -494,13 +494,18 @@ func (m *SettingsModule) buildThumbnailMenu(u *types.UserSettings) (string, *tel
 		}
 	}
 
-	text := fmt.Sprintf("⌬ <b><u>%s</u></b>\n\n"+
+	bannerText := ""
+	if len(banner) > 0 && banner[0] != "" {
+		bannerText = banner[0] + "\n\n"
+	}
+
+	text := fmt.Sprintf("%s⌬ <b><u>%s</u></b>\n\n"+
 		"┠ <b>Status:</b> <code>%s</code>\n"+
 		"┖ <b>Stored File:</b> <code>%s</code>\n\n"+
 		"<i>Custom thumbnail will be embedded into your leeched media files.</i>\n\n"+
-		"• Click <b>Change Thumbnail</b> to activate 60s photo listener.\n"+
+		"• Click <b>Change Thumbnail</b> to activate photo listener.\n"+
 		"• Alternatively reply to a photo with <code>/us thumb</code>.",
-		telegram.ToSmallCaps("Custom Thumbnail Settings"), status, u.CustomThumb)
+		bannerText, telegram.ToSmallCaps("Custom Thumbnail Settings"), status, u.CustomThumb)
 
 	btn := telegram.NewButtonMaker()
 	if exists {
@@ -899,20 +904,22 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 
 	// 3. Thumbnail Submenu
 	case "thumb":
+		ext.ClearPendingThumbSession(targetUID)
 		text, btn := m.buildThumbnailMenu(u)
 		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 
 	case "cthumb":
-		ext.SetPendingThumbSession(targetUID, 0, msgID, 60*time.Second)
+		chatID := telegram.PeerToChatID(peer)
+		ext.SetPendingThumbSession(targetUID, chatID, msgID, 120*time.Second)
 		prompt := "⌬ <b><u>Send Custom Thumbnail</u></b>\n\n" +
-			"Please send a <b>photo</b> or image document within the next <b>60 seconds</b>.\n\n" +
-			"<i>Once received, it will be automatically saved as your custom thumbnail.</i>"
+			"Please send a <b>photo</b> or image document within the next <b>2 minutes</b>.\n\n" +
+			"<i>Once received, it will be automatically saved as your custom thumbnail and this menu will update.</i>"
 		btn := telegram.NewButtonMaker()
 		btn.IButtonStyled("« "+telegram.ToSmallCaps("Cancel"), fmt.Sprintf("userset %d thumb", u.UserID), "danger")
 		btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), fmt.Sprintf("userset %d close", u.UserID), "danger")
 		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, prompt, btn, 1)
-		_ = m.sender.AnswerCallback(ctx, queryID, "Send your photo within 60s...", false)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send your photo...", false)
 
 	case "vthumb":
 		if u.CustomThumb == "" {
@@ -1179,7 +1186,7 @@ func (m *SettingsModule) HandleSettingUpdated(ctx context.Context, peer tg.Input
 	case "split_size", "edit_split":
 		text, btn = m.buildSplitSizeMenu(u)
 	case "thumb", "cthumb":
-		text, btn = m.buildThumbnailMenu(u)
+		text, btn = m.buildThumbnailMenu(u, "✓ <b>Custom thumbnail saved successfully!</b>")
 	default:
 		text, btn = m.buildLeechMenu(u, "")
 	}

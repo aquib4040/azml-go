@@ -52,7 +52,7 @@ func IsPendingThumbSession(userID int64, chatID ...int64) bool {
 }
 
 // GetPendingThumbSession returns the active session for userID, if any
-func GetPendingThumbSession(userID int64) (*PendingThumbSession, bool) {
+func GetPendingThumbSession(userID int64, chatID ...int64) (*PendingThumbSession, bool) {
 	globalThumbState.mu.Lock()
 	defer globalThumbState.mu.Unlock()
 	sess, exists := globalThumbState.pending[userID]
@@ -62,6 +62,11 @@ func GetPendingThumbSession(userID int64) (*PendingThumbSession, bool) {
 	if time.Now().After(sess.ExpiresAt) {
 		delete(globalThumbState.pending, userID)
 		return nil, false
+	}
+	if len(chatID) > 0 && chatID[0] != 0 && sess.ChatID != 0 {
+		if sess.ChatID != chatID[0] {
+			return nil, false
+		}
 	}
 	return sess, true
 }

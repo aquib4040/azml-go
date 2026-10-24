@@ -294,7 +294,7 @@ func (b *BotApp) registerDispatcher() {
 		if !ok || msg.Out {
 			return nil
 		}
-		b.routeMessage(ctx, msg, e)
+		go b.routeMessage(ctx, msg, e)
 		return nil
 	})
 
@@ -308,7 +308,7 @@ func (b *BotApp) registerDispatcher() {
 		if !ok || msg.Out {
 			return nil
 		}
-		b.routeMessage(ctx, msg, e)
+		go b.routeMessage(ctx, msg, e)
 		return nil
 	})
 
@@ -323,7 +323,7 @@ func (b *BotApp) registerDispatcher() {
 				b.cacheAccessHash(uID, u.AccessHash)
 			}
 		}
-		b.routeCallback(ctx, update, e)
+		go b.routeCallback(ctx, update, e)
 		return nil
 	})
 }
@@ -428,7 +428,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		}
 	}
 
-	if ext.IsPendingThumbSession(senderID, chatID) && text == "/cancel" {
+	if sess, ok := ext.GetPendingThumbSession(senderID, chatID); ok && text == "/cancel" {
 		inMsgID := m.ID
 		ext.ClearPendingThumbSession(senderID)
 		go func() {
@@ -436,6 +436,10 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 			defer cancel()
 			_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
 		}()
+		if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
+			u := b.userMap.GetOrCreate(senderID)
+			b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
+		}
 		return
 	}
 
@@ -484,28 +488,24 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				}
 			}
 
-			// 3. Populate replied message text and media
-			if repliedMsg, err := telegram.FetchMessage(ctx, b.rawAPI, targetPeer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
+			// 3. Populate replied message text and media with quick 2s timeout
+			fetchCtx, fetchCancel := context.WithTimeout(ctx, 2*time.Second)
+			if repliedMsg, err := telegram.FetchMessage(fetchCtx, b.rawAPI, targetPeer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
 				msgCtx.ReplyText = repliedMsg.Message
 				if repliedMsg.Media != nil {
 					msgCtx.HasMedia = true
 					msgCtx.RawMedia = repliedMsg.Media
 				}
-			} else {
-				if targetPeer != peer {
-					if rMsg, rErr := telegram.FetchMessage(ctx, b.rawAPI, peer, msgCtx.ReplyToID); rErr == nil && rMsg != nil {
-						msgCtx.ReplyText = rMsg.Message
-						if rMsg.Media != nil {
-							msgCtx.HasMedia = true
-							msgCtx.RawMedia = rMsg.Media
-						}
-					} else {
-						log.Printf("[AZML-Go] Failed to fetch replied message %d: %v (fallback: %v)", msgCtx.ReplyToID, err, rErr)
+			} else if targetPeer != peer {
+				if rMsg, rErr := telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID); rErr == nil && rMsg != nil {
+					msgCtx.ReplyText = rMsg.Message
+					if rMsg.Media != nil {
+						msgCtx.HasMedia = true
+						msgCtx.RawMedia = rMsg.Media
 					}
-				} else {
-					log.Printf("[AZML-Go] Failed to fetch replied message %d: %v", msgCtx.ReplyToID, err)
 				}
 			}
+			fetchCancel()
 		}
 	}
 
@@ -1212,8 +1212,8 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 			if strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") {
 				caption := strings.ToLower(strings.TrimSpace(m.Message))
 				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
-				// Only intercept if explicit thumb command or active pending session in this chat without command prefix
-				if isThumbCmd || (ext.IsPendingThumbSession(senderID, chatID) && !strings.HasPrefix(caption, "/")) {
+				sess, isPending := ext.GetPendingThumbSession(senderID, chatID)
+				if isThumbCmd || (isPending && sess != nil && !strings.HasPrefix(caption, "/")) {
 					ext.ClearPendingThumbSession(senderID)
 					_ = os.MkdirAll("Thumbnails", 0755)
 					destThumb := fmt.Sprintf("Thumbnails/%d.jpg", senderID)
@@ -1225,7 +1225,19 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 							u := b.userMap.GetOrCreate(senderID)
 							u.CustomThumb = destThumb
 							_ = ext.DB.SaveUser(u)
-							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+
+							inMsgID := m.ID
+							go func() {
+								delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+								defer cancel()
+								_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+							}()
+
+							if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
+								b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
+							} else {
+								_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+							}
 							return true
 						}
 					}
@@ -1262,8 +1274,8 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 	if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 		caption := strings.ToLower(strings.TrimSpace(m.Message))
 		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
-		// Only intercept if explicit thumb command or active pending session in this chat without command prefix
-		if isThumbCmd || (ext.IsPendingThumbSession(senderID, chatID) && !strings.HasPrefix(caption, "/")) {
+		sess, isPending := ext.GetPendingThumbSession(senderID, chatID)
+		if isThumbCmd || (isPending && sess != nil && !strings.HasPrefix(caption, "/")) {
 			ext.ClearPendingThumbSession(senderID)
 			if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
 				_ = os.MkdirAll("Thumbnails", 0755)
@@ -1285,7 +1297,19 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 						u := b.userMap.GetOrCreate(senderID)
 						u.CustomThumb = destThumb
 						_ = ext.DB.SaveUser(u)
-						_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+
+						inMsgID := m.ID
+						go func() {
+							delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+							defer cancel()
+							_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
+						}()
+
+						if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
+							b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
+						} else {
+							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+						}
 						return true
 					}
 				}
