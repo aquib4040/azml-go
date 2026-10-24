@@ -1,0 +1,49 @@
+name: Release & Packaging Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Linux Release Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build Linux Binaries
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          TAG_NAME="${{ github.ref_name }}"
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${TAG_NAME}" -o dist/azml-go-linux-amd64 .
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${TAG_NAME}" -o dist/azml-go-linux-arm64 .
+
+          # Generate SHA256 checksums
+          cd dist
+          sha256sum * > checksums.txt
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

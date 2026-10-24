@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"azml-go/types"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
+	"azml-go/types"
 
 	"github.com/gotd/td/tg"
 )
@@ -218,4 +218,3 @@ func parsePremiumArgs(msg *types.MessageContext) (int64, int64) {
 
 	return targetID, totalSeconds
 }
-

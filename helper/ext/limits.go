@@ -13,9 +13,9 @@ import (
 )
 
 type userDailyStats struct {
-	date       string
-	taskCount  int
-	bytesUsed  int64
+	date      string
+	taskCount int
+	bytesUsed int64
 }
 
 var (

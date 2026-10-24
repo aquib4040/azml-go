@@ -30,41 +30,41 @@ var (
 )
 
 type BotApp struct {
-	client     *td.Client
-	rawAPI     *tg.Client
-	userClient *td.Client
-	userRawAPI *tg.Client
-	dispatcher tg.UpdateDispatcher
-	gaps       *updates.Manager
-	sender     *telegram.MessageSender
-	uploader   *uploader.TelegramUploader
-	userMap    *types.SafeUserMap
-	startTime  time.Time
+	client      *td.Client
+	rawAPI      *tg.Client
+	userClient  *td.Client
+	userRawAPI  *tg.Client
+	dispatcher  tg.UpdateDispatcher
+	gaps        *updates.Manager
+	sender      *telegram.MessageSender
+	uploader    *uploader.TelegramUploader
+	userMap     *types.SafeUserMap
+	startTime   time.Time
 	botUsername string
 
 	// Modules
-	leechHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool)
-	ytdlHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	statusHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	statusCbHandler  func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string)
-	cancelHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	cancelAllHandler func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	cancelCbHandler  func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
+	leechHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool)
+	ytdlHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	statusHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	statusCbHandler   func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string)
+	cancelHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	cancelAllHandler  func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	cancelCbHandler   func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	settingsHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	settingsCbHandler func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	bsettingHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	bsettingCbHandler func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	authHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	unauthHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	addSudoHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	rmSudoHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	addPremHandler   func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	rmPremHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	checkPremHandler func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	startHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	helpHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	pingHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	statsHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	unauthHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	addSudoHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	rmSudoHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	addPremHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	rmPremHandler     func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	checkPremHandler  func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	startHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	helpHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	pingHandler       func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
+	statsHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	logHandler        func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	restartHandler    func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	speedtestHandler  func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)

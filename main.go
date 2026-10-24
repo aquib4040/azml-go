@@ -129,4 +129,3 @@ func main() {
 		log.Fatalf("Fatal error running AZML-Go: %v", err)
 	}
 }
-

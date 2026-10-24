@@ -991,4 +991,3 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 	}
 	return opt, link
 }
-

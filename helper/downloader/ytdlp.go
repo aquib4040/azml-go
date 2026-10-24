@@ -159,17 +159,17 @@ type YtDlpDownloadTask struct {
 	mu        sync.RWMutex
 }
 
-func (t *YtDlpDownloadTask) GID() string             { return "ytdlp" }
-func (t *YtDlpDownloadTask) Name() string            { return t.name }
-func (t *YtDlpDownloadTask) Size() int64             { return t.size }
-func (t *YtDlpDownloadTask) DownloadedBytes() int64  { return t.curr }
-func (t *YtDlpDownloadTask) Speed() float64          { return t.speed }
-func (t *YtDlpDownloadTask) Status() types.TaskStatus  { return t.status }
-func (t *YtDlpDownloadTask) Engine() string          { return "yt-dlp [16frags]" }
-func (t *YtDlpDownloadTask) StartTime() time.Time    { return t.startTime }
-func (t *YtDlpDownloadTask) MessageID() int          { return 0 }
-func (t *YtDlpDownloadTask) ChatID() int64           { return 0 }
-func (t *YtDlpDownloadTask) UserID() int64           { return 0 }
+func (t *YtDlpDownloadTask) GID() string              { return "ytdlp" }
+func (t *YtDlpDownloadTask) Name() string             { return t.name }
+func (t *YtDlpDownloadTask) Size() int64              { return t.size }
+func (t *YtDlpDownloadTask) DownloadedBytes() int64   { return t.curr }
+func (t *YtDlpDownloadTask) Speed() float64           { return t.speed }
+func (t *YtDlpDownloadTask) Status() types.TaskStatus { return t.status }
+func (t *YtDlpDownloadTask) Engine() string           { return "yt-dlp [16frags]" }
+func (t *YtDlpDownloadTask) StartTime() time.Time     { return t.startTime }
+func (t *YtDlpDownloadTask) MessageID() int           { return 0 }
+func (t *YtDlpDownloadTask) ChatID() int64            { return 0 }
+func (t *YtDlpDownloadTask) UserID() int64            { return 0 }
 func (t *YtDlpDownloadTask) Progress() float64 {
 	if t.size <= 0 {
 		return 0
@@ -195,4 +195,3 @@ func (t *YtDlpDownloadTask) Cancel() error {
 	}
 	return nil
 }
-

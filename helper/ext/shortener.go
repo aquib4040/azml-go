@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"azml-go/types"
 	"azml-go/config"
 	"azml-go/helper/telegram"
+	"azml-go/types"
 
 	"github.com/google/uuid"
 )
@@ -143,4 +143,3 @@ func VerifyToken(tokenPayload string, senderID int64, userCache *types.SafeUserM
 	cfg := config.Get()
 	return true, fmt.Sprintf("🎉 <b>Token Verified Successfully!</b>\n<b>Validity:</b> <code>%s</code>", GetReadableTime(cfg.TokenTimeout))
 }
-

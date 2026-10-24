@@ -28,8 +28,8 @@ type MegaSelectionStore struct {
 }
 
 var (
-	GDriveStore = &GDriveSelectionStore{}
-	MegaStore   = &MegaSelectionStore{}
+	GDriveStore  = &GDriveSelectionStore{}
+	MegaStore    = &MegaSelectionStore{}
 	baseStoreDir = "/usr/src/app/downloads/.selections"
 )
 

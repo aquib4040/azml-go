@@ -1,7 +1,12 @@
 # Binaries
 azml-go
+azml-go-*
 azml-go.exe
 *.exe
+
+# Testing & Coverage
+coverage.*
+*.out
 
 # Configuration & data
 config.env

@@ -43,18 +43,18 @@ type Aria2BTInfo struct {
 }
 
 type Aria2StatusResponse struct {
-	GID             string          `json:"gid"`
-	Status          string          `json:"status"` // "active", "waiting", "paused", "error", "complete", "removed"
-	TotalLength     string          `json:"totalLength"`
-	CompletedLength string          `json:"completedLength"`
-	UploadSpeed     string          `json:"uploadSpeed"`
-	DownloadSpeed   string          `json:"downloadSpeed"`
-	ErrorMessage    string          `json:"errorMessage"`
-	Dir             string          `json:"dir"`
-	Files           []Aria2File     `json:"files"`
-	FollowedBy      []string        `json:"followedBy"`
-	Following       string          `json:"following"`
-	Bittorrent      *Aria2BTInfo    `json:"bittorrent"`
+	GID             string       `json:"gid"`
+	Status          string       `json:"status"` // "active", "waiting", "paused", "error", "complete", "removed"
+	TotalLength     string       `json:"totalLength"`
+	CompletedLength string       `json:"completedLength"`
+	UploadSpeed     string       `json:"uploadSpeed"`
+	DownloadSpeed   string       `json:"downloadSpeed"`
+	ErrorMessage    string       `json:"errorMessage"`
+	Dir             string       `json:"dir"`
+	Files           []Aria2File  `json:"files"`
+	FollowedBy      []string     `json:"followedBy"`
+	Following       string       `json:"following"`
+	Bittorrent      *Aria2BTInfo `json:"bittorrent"`
 }
 
 type JSONRPCRequest struct {
@@ -242,15 +242,15 @@ func (a *Aria2RPCClient) AddTorrent(torrentFilePath, downloadDir string) (string
 
 	b64Torrent := base64.StdEncoding.EncodeToString(data)
 	opts := map[string]interface{}{
-		"dir":                        downloadDir,
-		"max-connection-per-server":  "16",
-		"split":                      "16",
-		"min-split-size":             "1M",
-		"bt-max-peers":               "128",
+		"dir":                         downloadDir,
+		"max-connection-per-server":   "16",
+		"split":                       "16",
+		"min-split-size":              "1M",
+		"bt-max-peers":                "128",
 		"bt-request-peer-speed-limit": "0",
-		"seed-time":                  "0",
-		"seed-ratio":                 "0.0",
-		"allow-overwrite":            "true",
+		"seed-time":                   "0",
+		"seed-ratio":                  "0.0",
+		"allow-overwrite":             "true",
 	}
 
 	params := []interface{}{
@@ -509,4 +509,3 @@ func (t *Aria2DownloadTask) PollUntilComplete(ctx context.Context, onProgress fu
 		}
 	}
 }
-

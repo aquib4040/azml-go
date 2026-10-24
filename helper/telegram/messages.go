@@ -368,4 +368,3 @@ func FetchMessage(ctx context.Context, rawClient *tg.Client, peer tg.InputPeerCl
 
 	return nil, fmt.Errorf("message not found")
 }
-

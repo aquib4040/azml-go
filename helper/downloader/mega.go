@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"azml-go/types"
 	"azml-go/config"
 	"azml-go/helper/ext"
+	"azml-go/types"
 )
 
 type MegaFileInfo struct {
@@ -91,17 +91,17 @@ type MegaDownloadTask struct {
 	mu        sync.RWMutex
 }
 
-func (t *MegaDownloadTask) GID() string             { return "mega" }
-func (t *MegaDownloadTask) Name() string            { return t.name }
-func (t *MegaDownloadTask) Size() int64             { return t.size }
-func (t *MegaDownloadTask) DownloadedBytes() int64  { return t.curr }
-func (t *MegaDownloadTask) Speed() float64          { return t.speed }
-func (t *MegaDownloadTask) Status() types.TaskStatus  { return t.status }
-func (t *MegaDownloadTask) Engine() string          { return "MegaSDK / Aria2c" }
-func (t *MegaDownloadTask) StartTime() time.Time    { return t.startTime }
-func (t *MegaDownloadTask) MessageID() int          { return 0 }
-func (t *MegaDownloadTask) ChatID() int64           { return 0 }
-func (t *MegaDownloadTask) UserID() int64           { return 0 }
+func (t *MegaDownloadTask) GID() string              { return "mega" }
+func (t *MegaDownloadTask) Name() string             { return t.name }
+func (t *MegaDownloadTask) Size() int64              { return t.size }
+func (t *MegaDownloadTask) DownloadedBytes() int64   { return t.curr }
+func (t *MegaDownloadTask) Speed() float64           { return t.speed }
+func (t *MegaDownloadTask) Status() types.TaskStatus { return t.status }
+func (t *MegaDownloadTask) Engine() string           { return "MegaSDK / Aria2c" }
+func (t *MegaDownloadTask) StartTime() time.Time     { return t.startTime }
+func (t *MegaDownloadTask) MessageID() int           { return 0 }
+func (t *MegaDownloadTask) ChatID() int64            { return 0 }
+func (t *MegaDownloadTask) UserID() int64            { return 0 }
 func (t *MegaDownloadTask) Progress() float64 {
 	if t.size <= 0 {
 		return 0
@@ -128,4 +128,3 @@ func (t *MegaDownloadTask) Cancel() error {
 func IsMegaLink(link string) bool {
 	return strings.Contains(link, "mega.nz")
 }
-

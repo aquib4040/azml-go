@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"azml-go/types"
 	"azml-go/config"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
+	"azml-go/types"
 
 	"github.com/gotd/td/tg"
 )
@@ -175,4 +175,3 @@ func (m *HelpModule) HandleRestart(ctx context.Context, peer tg.InputPeerClass, 
 	_, _ = m.sender.SendMessage(ctx, peer, "🔄 <i>Restarting AZML-Go...</i>", msg.MessageID, nil)
 	os.Exit(0)
 }
-

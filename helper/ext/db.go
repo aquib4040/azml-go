@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"azml-go/types"
 	"azml-go/config"
+	"azml-go/types"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -132,4 +132,3 @@ func (d *DatabaseManager) SaveUser(u *types.UserSettings) error {
 	}
 	return os.WriteFile(d.localFile, newData, 0644)
 }
-

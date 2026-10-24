@@ -3,8 +3,8 @@ package telegram
 import (
 	"time"
 
-	"azml-go/types"
 	"azml-go/config"
+	"azml-go/types"
 )
 
 func IsOwner(userID int64) bool {
@@ -114,4 +114,3 @@ func IsPremium(userID int64, userCache *types.SafeUserMap) bool {
 	}
 	return false
 }
-

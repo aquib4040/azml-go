@@ -51,17 +51,17 @@ type TelegramDownloadTask struct {
 	mu        sync.RWMutex
 }
 
-func (t *TelegramDownloadTask) GID() string             { return "tgdl" }
-func (t *TelegramDownloadTask) Name() string            { return t.name }
-func (t *TelegramDownloadTask) Size() int64             { return t.size }
-func (t *TelegramDownloadTask) DownloadedBytes() int64  { return t.curr }
-func (t *TelegramDownloadTask) Speed() float64          { return t.speed }
-func (t *TelegramDownloadTask) Status() types.TaskStatus  { return t.status }
-func (t *TelegramDownloadTask) Engine() string          { return "MTProto Downloader" }
-func (t *TelegramDownloadTask) StartTime() time.Time    { return t.startTime }
-func (t *TelegramDownloadTask) MessageID() int          { return 0 }
-func (t *TelegramDownloadTask) ChatID() int64           { return 0 }
-func (t *TelegramDownloadTask) UserID() int64           { return 0 }
+func (t *TelegramDownloadTask) GID() string              { return "tgdl" }
+func (t *TelegramDownloadTask) Name() string             { return t.name }
+func (t *TelegramDownloadTask) Size() int64              { return t.size }
+func (t *TelegramDownloadTask) DownloadedBytes() int64   { return t.curr }
+func (t *TelegramDownloadTask) Speed() float64           { return t.speed }
+func (t *TelegramDownloadTask) Status() types.TaskStatus { return t.status }
+func (t *TelegramDownloadTask) Engine() string           { return "MTProto Downloader" }
+func (t *TelegramDownloadTask) StartTime() time.Time     { return t.startTime }
+func (t *TelegramDownloadTask) MessageID() int           { return 0 }
+func (t *TelegramDownloadTask) ChatID() int64            { return 0 }
+func (t *TelegramDownloadTask) UserID() int64            { return 0 }
 func (t *TelegramDownloadTask) Progress() float64 {
 	if t.size <= 0 {
 		return 0
@@ -84,4 +84,3 @@ func (t *TelegramDownloadTask) Cancel() error {
 	}
 	return nil
 }
-

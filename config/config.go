@@ -398,4 +398,3 @@ func GetConfigMap() map[string]string {
 		"STORAGE_THRESHOLD":            strconv.FormatInt(GlobalConfig.StorageThreshold, 10),
 	}
 }
-

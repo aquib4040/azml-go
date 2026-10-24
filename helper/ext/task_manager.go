@@ -289,23 +289,23 @@ func NewQueueTask(gid, name string, size int64, status types.TaskStatus, chatID,
 	}
 }
 
-func (q *QueueTask) GID() string             { return q.gid }
-func (q *QueueTask) Name() string            { return q.name }
-func (q *QueueTask) Size() int64             { return q.size }
-func (q *QueueTask) DownloadedBytes() int64  { return 0 }
-func (q *QueueTask) Speed() float64          { return 0 }
-func (q *QueueTask) ETA() string             { return "-" }
-func (q *QueueTask) Progress() float64       { return 0 }
+func (q *QueueTask) GID() string            { return q.gid }
+func (q *QueueTask) Name() string           { return q.name }
+func (q *QueueTask) Size() int64            { return q.size }
+func (q *QueueTask) DownloadedBytes() int64 { return 0 }
+func (q *QueueTask) Speed() float64         { return 0 }
+func (q *QueueTask) ETA() string            { return "-" }
+func (q *QueueTask) Progress() float64      { return 0 }
 func (q *QueueTask) Status() types.TaskStatus {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	return q.status
 }
-func (q *QueueTask) Engine() string          { return "Sleep v0" }
-func (q *QueueTask) StartTime() time.Time    { return q.startTime }
-func (q *QueueTask) MessageID() int          { return q.msgID }
-func (q *QueueTask) ChatID() int64           { return q.chatID }
-func (q *QueueTask) UserID() int64           { return q.userID }
+func (q *QueueTask) Engine() string       { return "Sleep v0" }
+func (q *QueueTask) StartTime() time.Time { return q.startTime }
+func (q *QueueTask) MessageID() int       { return q.msgID }
+func (q *QueueTask) ChatID() int64        { return q.chatID }
+func (q *QueueTask) UserID() int64        { return q.userID }
 func (q *QueueTask) Cancel() error {
 	q.mu.Lock()
 	cancel := q.cancelFn
@@ -690,4 +690,3 @@ func StartFromQueued() {
 		}
 	}
 }
-

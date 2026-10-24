@@ -470,4 +470,3 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 	}
 	return ""
 }
-

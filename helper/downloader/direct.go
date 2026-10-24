@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"azml-go/types"
 	"azml-go/helper/ext"
+	"azml-go/types"
 )
 
 type DirectDownloader struct {
@@ -116,17 +116,17 @@ type DirectDownloadTask struct {
 	mu        sync.RWMutex
 }
 
-func (t *DirectDownloadTask) GID() string             { return "direct" }
-func (t *DirectDownloadTask) Name() string            { return t.name }
-func (t *DirectDownloadTask) Size() int64             { return t.size }
-func (t *DirectDownloadTask) DownloadedBytes() int64  { return t.curr }
-func (t *DirectDownloadTask) Speed() float64          { return t.speed }
-func (t *DirectDownloadTask) Status() types.TaskStatus  { return t.status }
-func (t *DirectDownloadTask) Engine() string          { return "Aria2c / Direct HTTP" }
-func (t *DirectDownloadTask) StartTime() time.Time    { return t.startTime }
-func (t *DirectDownloadTask) MessageID() int          { return 0 }
-func (t *DirectDownloadTask) ChatID() int64           { return 0 }
-func (t *DirectDownloadTask) UserID() int64           { return 0 }
+func (t *DirectDownloadTask) GID() string              { return "direct" }
+func (t *DirectDownloadTask) Name() string             { return t.name }
+func (t *DirectDownloadTask) Size() int64              { return t.size }
+func (t *DirectDownloadTask) DownloadedBytes() int64   { return t.curr }
+func (t *DirectDownloadTask) Speed() float64           { return t.speed }
+func (t *DirectDownloadTask) Status() types.TaskStatus { return t.status }
+func (t *DirectDownloadTask) Engine() string           { return "Aria2c / Direct HTTP" }
+func (t *DirectDownloadTask) StartTime() time.Time     { return t.startTime }
+func (t *DirectDownloadTask) MessageID() int           { return 0 }
+func (t *DirectDownloadTask) ChatID() int64            { return 0 }
+func (t *DirectDownloadTask) UserID() int64            { return 0 }
 func (t *DirectDownloadTask) Progress() float64 {
 	if t.size <= 0 {
 		return 0
@@ -149,4 +149,3 @@ func (t *DirectDownloadTask) Cancel() error {
 	}
 	return nil
 }
-

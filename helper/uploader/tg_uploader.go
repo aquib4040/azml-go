@@ -43,16 +43,16 @@ func NewTelegramUploader(botClient *tg.Client, userClient *tg.Client) *TelegramU
 type UploadProgressFunc func(curr, total int64, speed float64, eta string)
 
 type UploadOptions struct {
-	FilePath     string
-	FileName     string
-	Caption      string
-	ThumbPath    string
-	CoverPath    string
-	AsDoc        bool
-	DumpChatID   int64
-	LogChatID    int64
-	IsPremium    bool
-	OnProgress   UploadProgressFunc
+	FilePath   string
+	FileName   string
+	Caption    string
+	ThumbPath  string
+	CoverPath  string
+	AsDoc      bool
+	DumpChatID int64
+	LogChatID  int64
+	IsPremium  bool
+	OnProgress UploadProgressFunc
 }
 
 func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClass, opt UploadOptions) (*tg.UpdatesClass, error) {
@@ -339,17 +339,17 @@ func NewUploadTask(gid, name string, size int64, chatID, userID int64, msgID int
 	}
 }
 
-func (t *UploadTask) GID() string             { return t.gid }
-func (t *UploadTask) Name() string            { return t.name }
-func (t *UploadTask) Size() int64             { return t.size }
-func (t *UploadTask) DownloadedBytes() int64  { return t.curr }
-func (t *UploadTask) Speed() float64          { return t.speed }
-func (t *UploadTask) Status() types.TaskStatus  { return t.status }
-func (t *UploadTask) Engine() string          { return "MTProto" }
-func (t *UploadTask) StartTime() time.Time    { return t.startTime }
-func (t *UploadTask) MessageID() int          { return t.msgID }
-func (t *UploadTask) ChatID() int64           { return t.chatID }
-func (t *UploadTask) UserID() int64           { return t.userID }
+func (t *UploadTask) GID() string              { return t.gid }
+func (t *UploadTask) Name() string             { return t.name }
+func (t *UploadTask) Size() int64              { return t.size }
+func (t *UploadTask) DownloadedBytes() int64   { return t.curr }
+func (t *UploadTask) Speed() float64           { return t.speed }
+func (t *UploadTask) Status() types.TaskStatus { return t.status }
+func (t *UploadTask) Engine() string           { return "MTProto" }
+func (t *UploadTask) StartTime() time.Time     { return t.startTime }
+func (t *UploadTask) MessageID() int           { return t.msgID }
+func (t *UploadTask) ChatID() int64            { return t.chatID }
+func (t *UploadTask) UserID() int64            { return t.userID }
 func (t *UploadTask) Progress() float64 {
 	if t.size <= 0 {
 		return 0
@@ -388,4 +388,3 @@ func (t *UploadTask) Update(curr, total int64, speed float64, eta string) {
 	t.speed = speed
 	t.eta = eta
 }
-
