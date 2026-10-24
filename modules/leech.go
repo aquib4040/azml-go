@@ -275,7 +275,10 @@ func (m *LeechModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCl
 func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.MessageContext, opt types.LeechOptions, link, taskDir string, notifyID int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	defer os.RemoveAll(taskDir)
+	defer func() {
+		_ = os.RemoveAll(taskDir)
+		log.Printf("[AZML-Go] Cleared directory: %s", taskDir)
+	}()
 
 	cfg := config.Get()
 	user := m.userMap.Get(msg.UserID)
@@ -1104,6 +1107,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				UserID:     msg.UserID,
 				BotPM:      botPM,
 				IsPremium:  isPremium,
+				GID:        taskUID,
 				OnProgress: func(curr, total int64, speed float64, eta string) {
 					if speed > maxULSpeed {
 						maxULSpeed = speed

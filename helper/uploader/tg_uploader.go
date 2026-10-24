@@ -101,6 +101,7 @@ type UploadOptions struct {
 	UserID     int64
 	BotPM      bool
 	IsPremium  bool
+	GID        string
 	OnProgress UploadProgressFunc
 }
 
@@ -182,10 +183,8 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		if u.userClient == nil || u.userUp == nil {
 			return nil, fmt.Errorf("file size %s exceeds 2GB limit; USER_SESSION_STRING is required to upload files > 2GB (up to 4GB)", ext.GetReadableFileSize(fileSize))
 		}
-		log.Printf("[AZML-Go] Uploading %s (%s > 2GB) using User Client...", opt.FileName, ext.GetReadableFileSize(fileSize))
 		clientToUse = u.userClient
 	} else {
-		log.Printf("[AZML-Go] Uploading %s (%s <= 2GB) using Bot Client...", opt.FileName, ext.GetReadableFileSize(fileSize))
 		clientToUse = u.botClient
 	}
 
@@ -194,6 +193,12 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	if uploadName == "" {
 		uploadName = filepath.Base(opt.FilePath)
 	}
+
+	gidStr := ""
+	if opt.GID != "" {
+		gidStr = fmt.Sprintf(" (GID: %s)", opt.GID)
+	}
+	log.Printf("[AZML-Go] Upload started: %s%s", uploadName, gidStr)
 
 	tracker := &uploadProgressTracker{
 		uploadStart: uploadStart,
@@ -257,9 +262,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		if int(totalParts) < numWorkers {
 			numWorkers = int(totalParts)
 		}
-
-		log.Printf("[AZML-Go Uploader] Parallel chunk upload for %s (%s, %d parts, %d workers)",
-			uploadName, ext.GetReadableFileSize(fileSize), totalParts, numWorkers)
 
 		var wg sync.WaitGroup
 		for w := 0; w < numWorkers; w++ {
