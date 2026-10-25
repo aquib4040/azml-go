@@ -241,7 +241,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	const twoGB = int64(2097152000)
 	var clientToUse *tg.Client
-	var workerSession *pool.BotSession
 
 	if fileSize > twoGB {
 		if u.userClient == nil || u.userUp == nil {
@@ -249,19 +248,10 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 		clientToUse = u.userClient
 	} else {
-		// Multi-bot upload load balancing:
-		// When SessionPool has active sessions, use a worker session to avoid rate-limiting the main bot.
-		if u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 {
-			cfg := config.Get()
-			if wBot, err := u.sessPool.GetNextAvailable(cfg.WorkerBotTokens, cfg.TelegramAPI, cfg.TelegramHash); err == nil && wBot != nil {
-				workerSession = wBot
-				clientToUse = wBot.API
-				log.Printf("[AZML-Go Uploader] Multi-bot worker session ...%s selected for upload", wBot.SafeSuffix())
-			}
-		}
-		if clientToUse == nil {
-			clientToUse = u.botClient
-		}
+		// Use main bot client for uploads <= 2GB.
+		// Main bot is guaranteed to have membership in the target group chat and admin post permissions in dump channels.
+		// Parallel chunk uploading (8 threads) is handled within the session via MTProto upload.saveBigFilePart.
+		clientToUse = u.botClient
 	}
 
 	uploadStart := time.Now()
@@ -506,18 +496,19 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		effectiveDumpChatID = cfg.LeechLogID
 	}
 
-	if workerSession != nil && effectiveDumpChatID != 0 {
-		if inChan, err := workerSession.ResolveChannel(ctx, effectiveDumpChatID); err == nil && inChan != nil {
+	if effectiveDumpChatID != 0 {
+		rawDumpID := pool.RawChannelID(effectiveDumpChatID)
+		dumpHash := telegram.ResolveChannelAccessHash(ctx, clientToUse, effectiveDumpChatID)
+		if dumpHash == 0 {
+			dumpHash = telegram.GetChannelAccessHash(rawDumpID)
+		}
+		if dumpHash != 0 {
 			uploadPeer = &tg.InputPeerChannel{
-				ChannelID:  inChan.ChannelID,
-				AccessHash: inChan.AccessHash,
+				ChannelID:  rawDumpID,
+				AccessHash: dumpHash,
 			}
 			actualDestChatID = effectiveDumpChatID
-			log.Printf("[AZML-Go Uploader] Multi-bot worker uploading to dump channel %d (dest chat %d)", effectiveDumpChatID, fromChatID)
-		} else {
-			log.Printf("[AZML-Go Uploader] Worker could not resolve dump channel %d: %v. Falling back to main bot.", effectiveDumpChatID, err)
-			clientToUse = u.botClient
-			workerSession = nil
+			log.Printf("[AZML-Go Uploader] Uploading to dump channel %d (dest chat %d)", effectiveDumpChatID, fromChatID)
 		}
 	} else if isGroupChat {
 		// Prefer uploading directly to LeechLogID if its access hash is known
@@ -679,29 +670,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 				if fErr != nil {
 					log.Printf("[AZML-Go Uploader] Forward to dump failed: %v", fErr)
 				}
-			}
-		}
-
-		// 4. If uploaded to group chat as fallback, delete it from group chat so GC never keeps the file
-		if isGroupChat && actualDestChatID == fromChatID {
-			switch p := peer.(type) {
-			case *tg.InputPeerChannel:
-				accessHash := p.AccessHash
-				if accessHash == 0 {
-					accessHash = telegram.GetChannelAccessHash(p.ChannelID)
-				}
-				_, _ = clientToUse.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
-					Channel: &tg.InputChannel{
-						ChannelID:  p.ChannelID,
-						AccessHash: accessHash,
-					},
-					ID: []int{msgID},
-				})
-			default:
-				_, _ = clientToUse.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-					Revoke: true,
-					ID:     []int{msgID},
-				})
 			}
 		}
 	}

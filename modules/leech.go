@@ -517,16 +517,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 								dlErr = multiDL.DownloadToFile(ctx, effectiveDumpChatID, int64(fwdMsgID), doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
 									uTask.SetProgress(curr, total, speed, eta)
 								})
-
-								// Clean up forwarded message from dump channel asynchronously so it never delays task completion
-								go func(msgID int) {
-									cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 15*time.Second)
-									defer cleanCancel()
-									_, _ = m.rawAPI.ChannelsDeleteMessages(cleanCtx, &tg.ChannelsDeleteMessagesRequest{
-										Channel: &tg.InputChannel{ChannelID: rawDumpID, AccessHash: dumpHash},
-										ID:      []int{msgID},
-									})
-								}(fwdMsgID)
+								// Retain forwarded message in dump channel for backup and multi-client access
 
 								if dlErr == nil {
 									downloadedPath = destPath
