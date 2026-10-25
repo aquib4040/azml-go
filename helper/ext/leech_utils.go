@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"azml-go/config"
@@ -33,10 +34,66 @@ var (
 		"Anime-Supreme", "HiSub", "NC-Raws", "nekomoe kissaten",
 	}
 
-	seasonRegex = regexp.MustCompile(`(?i)[Ss](?:eason[\s\.\-]*)?0*(\d+)`)
-	qualRegex   = regexp.MustCompile(`(?i)(\d{3,4}[pP]|4K|2160[pP])`)
-	mathOffset  = regexp.MustCompile(`\{(episode|season):([+\-])(\d+)\}`)
+	uploaderTagRegexes []*regexp.Regexp
+	titlePatterns      []*regexp.Regexp
+	epPatterns         []*regexp.Regexp
+	yearRegex          = regexp.MustCompile(`(?i)\s*[\(\[]?\s*(199[0-9]|20[0-2][0-9]|2030)\s*[\)\]]?\s*`)
+	seasonRegex        = regexp.MustCompile(`(?i)[Ss](?:eason[\s\.\-]*)?0*(\d+)`)
+	qualRegex          = regexp.MustCompile(`(?i)(\d{3,4}[pP]|4K|2160[pP])`)
+	mathOffset         = regexp.MustCompile(`\{(episode|season):([+\-])(\d+)\}`)
+
+	regexCache   = make(map[string]*regexp.Regexp)
+	regexCacheMu sync.RWMutex
 )
+
+func init() {
+	for _, tag := range uploaderTags {
+		uploaderTagRegexes = append(uploaderTagRegexes, regexp.MustCompile(`(?i)^\[`+regexp.QuoteMeta(tag)+`\]\s*`))
+	}
+
+	titlePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^\[[Ee]p?(?:isode)?[\s\.\-]*0*\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:\[|@|$)`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]0*(\d+)[\s\.\-]*[Ee]0*(\d+)`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]eason[\s\.\-]*0*(\d+)[\s\.\-]*[Ee]pisode[\s\.\-]*0*(\d+)`),
+		regexp.MustCompile(`(?i)^\[CH[-\s]?\d+\][\s\.\-]*(.+?)[\s\.\-]*-`),
+		regexp.MustCompile(`(?i)^\[\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:@|$)`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*(?:Ch(?:apter)?|#)[\s\.\-]*\d+`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*\[`),
+	}
+
+	epPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})v\d+`),
+		regexp.MustCompile(`(?i)\[[Ee]p?(?:isode)?[\s\.\-]*0*(\d{1,4})\]`),
+		regexp.MustCompile(`(?i)[Ss]0*(\d+)[Ee]0*(\d+)`),
+		regexp.MustCompile(`(?i)[Ee]p(?:isode)?[\s\.\-]*0*(\d{1,4})`),
+		regexp.MustCompile(`(?i)[Ee][\s\.\-]*0*(\d{1,4})`),
+		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})`),
+		regexp.MustCompile(`(?i)[\s\.\-]+0*(\d{1,4})[\s\.\-]+\d{3,4}[pP]`),
+		regexp.MustCompile(`(?i)\[0*(\d{1,4})\]`),
+	}
+}
+
+func getCompiledRegex(pat string) (*regexp.Regexp, error) {
+	regexCacheMu.RLock()
+	re, ok := regexCache[pat]
+	regexCacheMu.RUnlock()
+	if ok {
+		return re, nil
+	}
+
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return nil, err
+	}
+
+	regexCacheMu.Lock()
+	if len(regexCache) > 500 {
+		regexCache = make(map[string]*regexp.Regexp)
+	}
+	regexCache[pat] = re
+	regexCacheMu.Unlock()
+	return re, nil
+}
 
 type ExtractedMeta struct {
 	Title   string
@@ -56,25 +113,15 @@ func ExtractMetadataFromFilename(filename string) ExtractedMeta {
 	}
 
 	clean := filename
-	for _, tag := range uploaderTags {
-		clean = regexp.MustCompile(`(?i)^\[`+regexp.QuoteMeta(tag)+`\]\s*`).ReplaceAllString(clean, "")
+	for _, re := range uploaderTagRegexes {
+		clean = re.ReplaceAllString(clean, "")
 	}
 	clean = strings.TrimSpace(clean)
-
-	titlePatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^\[[Ee]p?(?:isode)?[\s\.\-]*0*\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:\[|@|$)`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]0*(\d+)[\s\.\-]*[Ee]0*(\d+)`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]eason[\s\.\-]*0*(\d+)[\s\.\-]*[Ee]pisode[\s\.\-]*0*(\d+)`),
-		regexp.MustCompile(`(?i)^\[CH[-\s]?\d+\][\s\.\-]*(.+?)[\s\.\-]*-`),
-		regexp.MustCompile(`(?i)^\[\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:@|$)`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*(?:Ch(?:apter)?|#)[\s\.\-]*\d+`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*\[`),
-	}
 
 	for _, p := range titlePatterns {
 		if m := p.FindStringSubmatch(clean); len(m) > 1 {
 			title := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(m[1], ".", " "), "-", " "))
-			title = regexp.MustCompile(`(?i)\s*[\(\[]?\s*(199[0-9]|20[0-2][0-9]|2030)\s*[\)\]]?\s*`).ReplaceAllString(title, " ")
+			title = yearRegex.ReplaceAllString(title, " ")
 			meta.Title = strings.TrimSpace(title)
 			if len(m) >= 4 {
 				meta.Season = fmt.Sprintf("%02d", mustAtoi(m[2]))
@@ -86,17 +133,6 @@ func ExtractMetadataFromFilename(filename string) ExtractedMeta {
 
 	if sm := seasonRegex.FindStringSubmatch(filename); len(sm) > 1 {
 		meta.Season = fmt.Sprintf("%02d", mustAtoi(sm[1]))
-	}
-
-	epPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})v\d+`),
-		regexp.MustCompile(`(?i)\[[Ee]p?(?:isode)?[\s\.\-]*0*(\d{1,4})\]`),
-		regexp.MustCompile(`(?i)[Ss]0*(\d+)[Ee]0*(\d+)`),
-		regexp.MustCompile(`(?i)[Ee]p(?:isode)?[\s\.\-]*0*(\d{1,4})`),
-		regexp.MustCompile(`(?i)[Ee][\s\.\-]*0*(\d{1,4})`),
-		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})`),
-		regexp.MustCompile(`(?i)[\s\.\-]+0*(\d{1,4})[\s\.\-]+\d{3,4}[pP]`),
-		regexp.MustCompile(`(?i)\[0*(\d{1,4})\]`),
 	}
 
 	for _, ep := range epPatterns {
@@ -356,7 +392,7 @@ func applyRegexRemname(filename, rules string) string {
 		if len(args) >= 2 {
 			pat := args[0]
 			rep := args[1]
-			re, err := regexp.Compile(pat)
+			re, err := getCompiledRegex(pat)
 			if err == nil {
 				if len(args) == 3 {
 					count := mustAtoi(args[2])
@@ -370,7 +406,7 @@ func applyRegexRemname(filename, rules string) string {
 				}
 			}
 		} else if len(args) == 1 && args[0] != "" {
-			re, err := regexp.Compile(args[0])
+			re, err := getCompiledRegex(args[0])
 			if err == nil {
 				base = re.ReplaceAllString(base, "")
 			}
