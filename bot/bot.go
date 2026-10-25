@@ -283,6 +283,7 @@ func (b *BotApp) SetSelectHandlers(mega, gd func(ctx context.Context, peer tg.In
 	b.gdSelectCbHandler = gd
 }
 func (b *BotApp) GetRawAPI() *tg.Client                   { return b.rawAPI }
+func (b *BotApp) GetUserRawAPI() *tg.Client               { return b.userRawAPI }
 func (b *BotApp) GetSender() *telegram.MessageSender      { return b.sender }
 func (b *BotApp) GetUploader() *uploader.TelegramUploader { return b.uploader }
 func (b *BotApp) GetUserMap() *types.SafeUserMap          { return b.userMap }

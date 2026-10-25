@@ -26,12 +26,18 @@ type DownloadProgressFunc func(curr, total int64, speed float64, eta string)
 type TelegramChunkDownloader struct {
 	client           *tg.Client
 	globalFloodUntil atomic.Int64
+	lastReqTime      atomic.Int64
+	minIntervalNs    atomic.Int64
 }
 
 func NewTelegramChunkDownloader(client *tg.Client) *TelegramChunkDownloader {
-	return &TelegramChunkDownloader{
+	d := &TelegramChunkDownloader{
 		client: client,
 	}
+	// Default minimum interval between chunk requests: 180ms (~5.5 MB/s ceiling)
+	// Keeps request throughput smoothly under Telegram's MTProto flood-wait bucket.
+	d.minIntervalNs.Store(180 * int64(time.Millisecond))
+	return d
 }
 
 func (d *TelegramChunkDownloader) waitGlobalFlood(ctx context.Context) error {
@@ -61,6 +67,35 @@ func (d *TelegramChunkDownloader) triggerGlobalFlood(dur time.Duration) {
 			break
 		}
 	}
+}
+
+func (d *TelegramChunkDownloader) paceRequest(ctx context.Context) error {
+	interval := d.minIntervalNs.Load()
+	if interval <= 0 {
+		return nil
+	}
+
+	for {
+		now := time.Now().UnixNano()
+		last := d.lastReqTime.Load()
+		target := last + interval
+		if target > now {
+			diff := time.Duration(target - now)
+			if diff > 0 && diff < 3*time.Second {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(diff):
+				}
+			}
+			now = time.Now().UnixNano()
+		}
+
+		if d.lastReqTime.CompareAndSwap(last, now) {
+			break
+		}
+	}
+	return nil
 }
 
 // DownloadToFile downloads any Telegram document or media to disk using concurrent chunks,
@@ -96,14 +131,14 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 
 	_ = out.Truncate(fileSize)
 
-	numWorkers := 4
+	numWorkers := 2
 	if envVal := os.Getenv("DOWNLOAD_THREADS"); envVal != "" {
 		if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 			numWorkers = val
 		}
 	}
-	if numWorkers > 16 {
-		numWorkers = 16
+	if numWorkers > 8 {
+		numWorkers = 8
 	}
 	if totalParts < numWorkers {
 		numWorkers = totalParts
@@ -251,6 +286,11 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 			return nil, err
 		}
 
+		// Pace chunk requests to keep throughput smooth without tripping FloodWait
+		if err := d.paceRequest(ctx); err != nil {
+			return nil, err
+		}
+
 		partCtx, partCancel := context.WithTimeout(ctx, 60*time.Second)
 		res, err := d.client.UploadGetFile(partCtx, &tg.UploadGetFileRequest{
 			Precise:      false,
@@ -282,17 +322,23 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 			}
 		}
 
-		// 1. FloodWait — pause ALL workers globally, do NOT burn transient retry count
+		// 1. FloodWait — pause ALL workers globally, adaptively increase pacing interval
 		if waitDur, ok := tgerr.AsFloodWait(err); ok {
 			if waitDur < 1*time.Second {
 				waitDur = 1 * time.Second
 			}
-			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
+			jitter := time.Duration(rand.Intn(300)) * time.Millisecond
 			totalWait := waitDur + jitter
 			log.Printf("[TG Chunk DL] Part %d/%d FloodWait %v. Pausing all workers for %v...",
 				partIndex+1, totalParts, waitDur, totalWait)
 
 			d.triggerGlobalFlood(totalWait)
+
+			// Adaptively back off pacing to match Telegram's current session quota
+			currInterval := d.minIntervalNs.Load()
+			if currInterval < int64(450*time.Millisecond) {
+				d.minIntervalNs.Store(currInterval + int64(40*time.Millisecond))
+			}
 
 			select {
 			case <-ctx.Done():

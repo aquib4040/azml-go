@@ -24,22 +24,24 @@ import (
 )
 
 type LeechModule struct {
-	rawAPI    *tg.Client
-	sender    *telegram.MessageSender
-	uploader  *uploader.TelegramUploader
-	userMap   *types.SafeUserMap
-	taskMgr   *ext.TaskManager
-	statusMod *StatusModule
+	rawAPI     *tg.Client
+	userRawAPI *tg.Client
+	sender     *telegram.MessageSender
+	uploader   *uploader.TelegramUploader
+	userMap    *types.SafeUserMap
+	taskMgr    *ext.TaskManager
+	statusMod  *StatusModule
 }
 
-func NewLeechModule(rawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule) *LeechModule {
+func NewLeechModule(rawAPI, userRawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule) *LeechModule {
 	return &LeechModule{
-		rawAPI:    rawAPI,
-		sender:    sender,
-		uploader:  uploader,
-		userMap:   userMap,
-		taskMgr:   ext.GetTaskManager(),
-		statusMod: statusMod,
+		rawAPI:     rawAPI,
+		userRawAPI: userRawAPI,
+		sender:     sender,
+		uploader:   uploader,
+		userMap:    userMap,
+		taskMgr:    ext.GetTaskManager(),
+		statusMod:  statusMod,
 	}
 }
 
@@ -470,7 +472,11 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					uTask.SetSize(doc.Size)
 					uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
 
-					chunkDL := downloader.NewTelegramChunkDownloader(m.rawAPI)
+					downloadClient := m.rawAPI
+					if m.userRawAPI != nil {
+						downloadClient = m.userRawAPI
+					}
+					chunkDL := downloader.NewTelegramChunkDownloader(downloadClient)
 					loc := doc.AsInputDocumentFileLocation("")
 					if loc != nil {
 						refreshRef := func() ([]byte, error) {

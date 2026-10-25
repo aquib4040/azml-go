@@ -92,7 +92,7 @@ func main() {
 	ext.SetBotStartTime(startTime)
 
 	statusMod := modules.NewStatusModule(sender)
-	leechMod := modules.NewLeechModule(app.GetRawAPI(), sender, uploader, userMap, statusMod)
+	leechMod := modules.NewLeechModule(app.GetRawAPI(), app.GetUserRawAPI(), sender, uploader, userMap, statusMod)
 	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap, statusMod)
 	cancelMod := modules.NewCancelModule(sender, userMap, statusMod)
 	settingsMod := modules.NewSettingsModule(app.GetRawAPI(), sender, userMap)
