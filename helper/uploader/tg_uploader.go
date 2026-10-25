@@ -252,26 +252,37 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		effectiveLogChatID = cfg.LeechLogID
 	}
 
+	targetChatID := fromChatID
+	if isGroupChat {
+		if effectiveLogChatID != 0 {
+			targetChatID = effectiveLogChatID
+		} else if opt.UserID != 0 {
+			targetChatID = opt.UserID
+		}
+	} else if opt.UserID != 0 {
+		targetChatID = opt.UserID
+	}
+
 	if fileSize > twoGB {
 		if u.userClient == nil || u.userUp == nil {
 			return nil, fmt.Errorf("file size %s exceeds 2GB limit; USER_SESSION_STRING is required to upload files > 2GB (up to 4GB)", ext.GetReadableFileSize(fileSize))
 		}
 		clientToUse = u.userClient
 	} else {
-		// Check if any worker bot is a member/admin in the chat where leech was started.
-		// If a worker bot has verified membership in this chat, it can assist with the upload.
-		// If no worker bot is present (or only Main Bot is in the chat), use Main Bot.
-		if isGroupChat && u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 {
-			if wBot := u.sessPool.FindBotForChat(ctx, fromChatID); wBot != nil {
+		// Only select a worker bot if targetChatID is a channel/group AND a worker bot is verified to have admin access to targetChatID!
+		// If targetChatID is Leech Log channel (-100...), worker bot must be an admin in that channel.
+		// If worker bot is not in targetChatID (or target is User PM), fallback to Main Bot.
+		if targetChatID < 0 && u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 {
+			if wBot := u.sessPool.FindBotForChat(ctx, targetChatID); wBot != nil {
 				uploadBotSession = wBot
 				clientToUse = wBot.API
-				log.Printf("[AZML-Go Uploader] Worker bot ...%s has verified access to chat %d; using for upload", wBot.SafeSuffix(), fromChatID)
+				log.Printf("[AZML-Go Uploader] Worker bot ...%s has verified access to target chat %d; using for upload", wBot.SafeSuffix(), targetChatID)
 			}
 		}
 
 		if clientToUse == nil {
 			clientToUse = u.botClient
-			log.Printf("[AZML-Go Uploader] Main Bot selected for upload (verified chat/PM access)")
+			log.Printf("[AZML-Go Uploader] Main Bot selected for upload (verified target access to %d)", targetChatID)
 		}
 	}
 	if uploadBotSession != nil {
@@ -512,9 +523,16 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		// Prefer uploading to Leech Log ID if configured:
 		if effectiveLogChatID != 0 {
 			chID := getChannelID(effectiveLogChatID)
-			hash := telegram.ResolveChannelAccessHash(ctx, clientToUse, effectiveLogChatID)
-			if hash == 0 {
-				hash = telegram.GetChannelAccessHash(chID)
+			var hash int64
+			if uploadBotSession != nil {
+				if inChan, err := uploadBotSession.ResolveChannel(ctx, effectiveLogChatID); err == nil && inChan != nil {
+					hash = inChan.AccessHash
+				}
+			} else {
+				hash = telegram.ResolveChannelAccessHash(ctx, clientToUse, effectiveLogChatID)
+				if hash == 0 {
+					hash = telegram.GetChannelAccessHash(chID)
+				}
 			}
 			if hash != 0 {
 				uploadPeer = &tg.InputPeerChannel{
@@ -563,6 +581,28 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		res, sendErr = clientToUse.MessagesSendMedia(ctx, req)
 		if sendErr == nil {
 			break
+		}
+		// Fallback to Main Bot if sending with worker bot failed (e.g. CHANNEL_INVALID or CHAT_ADMIN_REQUIRED)
+		if uploadBotSession != nil && attempt == 0 {
+			log.Printf("[AZML-Go Uploader] Upload with worker bot failed (%v), falling back to Main Bot", sendErr)
+			clientToUse = u.botClient
+			uploadBotSession.ReleaseUpload()
+			uploadBotSession = nil
+			if effectiveLogChatID != 0 {
+				chID := getChannelID(effectiveLogChatID)
+				hash := telegram.ResolveChannelAccessHash(ctx, u.botClient, effectiveLogChatID)
+				if hash == 0 {
+					hash = telegram.GetChannelAccessHash(chID)
+				}
+				if hash != 0 {
+					uploadPeer = &tg.InputPeerChannel{
+						ChannelID:  chID,
+						AccessHash: hash,
+					}
+					req.Peer = uploadPeer
+				}
+			}
+			continue
 		}
 		// Fallback to command peer if sending to preferred peer failed (only for Main Bot)
 		if uploadBotSession == nil && uploadPeer != peer && attempt == 0 {
