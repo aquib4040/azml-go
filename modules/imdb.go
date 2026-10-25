@@ -98,7 +98,7 @@ func (m *ImdbModule) HandleImdb(ctx context.Context, peer tg.InputPeerClass, msg
 					if item.IMDbURL != "" {
 						btn.UButtonStyled("◈ "+telegram.ToSmallCaps("Open on IMDb"), item.IMDbURL, "primary")
 					}
-					_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))
+					_ = m.sender.EditMessageWithButtons(ctx, peer, waitID, text, btn, 1)
 					return
 				}
 			}
@@ -140,6 +140,6 @@ func (m *ImdbModule) HandleImdb(ctx context.Context, peer tg.InputPeerClass, msg
 
 		btn := telegram.NewButtonMaker()
 		btn.UButtonStyled("◈ "+telegram.ToSmallCaps("TMDb Page"), fmt.Sprintf("https://www.themoviedb.org/%s/%d", "movie", item.ID), "primary")
-		_ = m.sender.EditMessage(ctx, peer, waitID, text, btn.BuildMenu(1))
+		_ = m.sender.EditMessageWithButtons(ctx, peer, waitID, text, btn, 1)
 	}()
 }

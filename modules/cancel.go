@@ -114,7 +114,7 @@ func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerCla
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("All Tasks"), "canall all", "danger")
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "canall close", "danger")
 
-	_, _ = m.sender.SendMessage(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn.BuildMenu(2))
+	_, _ = m.sender.SendMessageWithButtons(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn, 2)
 }
 
 func (m *CancelModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64) {

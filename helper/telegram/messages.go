@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"azml-go/config"
+
 	"github.com/gotd/td/telegram/message/entity"
 	"github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/telegram/uploader"
@@ -265,12 +267,32 @@ func PeerToChatID(peer tg.InputPeerClass) int64 {
 	return 0
 }
 
-var botAPIHTTPClient = &http.Client{Timeout: 2 * time.Second}
+var botAPIHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+func getBotToken() string {
+	if cfg := config.Get(); cfg != nil && cfg.BotToken != "" {
+		return cfg.BotToken
+	}
+	return os.Getenv("BOT_TOKEN")
+}
 
 func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
 	if btn == nil {
 		return m.SendMessage(ctx, peer, text, replyToID, nil)
 	}
+
+	botToken := getBotToken()
+	chatID := PeerToChatID(peer)
+	if botToken != "" && chatID != 0 && btn.HasStyle() {
+		msgID, err := m.sendBotAPIMessage(ctx, botToken, chatID, text, replyToID, btn, cols)
+		if err == nil && msgID > 0 {
+			return msgID, nil
+		}
+		if err != nil {
+			log.Printf("[AZML-Go Bot API] SendMessage failed: %v, falling back to MTProto", err)
+		}
+	}
+
 	return m.SendMessage(ctx, peer, text, replyToID, btn.BuildMenu(cols))
 }
 
@@ -281,7 +303,136 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 	if btn == nil {
 		return m.EditMessage(ctx, peer, msgID, text, nil)
 	}
+
+	botToken := getBotToken()
+	chatID := PeerToChatID(peer)
+	if botToken != "" && chatID != 0 && btn.HasStyle() {
+		err := m.editBotAPIMessage(ctx, botToken, chatID, msgID, text, btn, cols)
+		if err == nil {
+			return nil
+		}
+		if err != nil {
+			log.Printf("[AZML-Go Bot API] EditMessage failed: %v, falling back to MTProto", err)
+		}
+	}
+
 	return m.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(cols))
+}
+
+func (m *MessageSender) sendBotAPIMessage(ctx context.Context, botToken string, chatID int64, text string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "HTML",
+	}
+	if replyToID != 0 {
+		payload["reply_to_message_id"] = replyToID
+	}
+	if btn != nil {
+		payload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := botAPIHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Ok          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			MessageID int `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return 0, err
+	}
+	if !res.Ok {
+		return 0, fmt.Errorf("bot api error: %s", res.Description)
+	}
+	return res.Result.MessageID, nil
+}
+
+func (m *MessageSender) editBotAPIMessage(ctx context.Context, botToken string, chatID int64, msgID int, text string, btn *ButtonMaker, cols int) error {
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"message_id": msgID,
+		"text":       text,
+		"parse_mode": "HTML",
+	}
+	if btn != nil {
+		payload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := botAPIHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Ok          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return err
+	}
+	if res.Ok || strings.Contains(res.Description, "message is not modified") {
+		return nil
+	}
+
+	// If the message is a photo/media message, edit caption instead
+	if strings.Contains(res.Description, "there is no text in the message to edit") {
+		capPayload := map[string]interface{}{
+			"chat_id":    chatID,
+			"message_id": msgID,
+			"caption":    text,
+			"parse_mode": "HTML",
+		}
+		if btn != nil {
+			capPayload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+		}
+		capBody, _ := json.Marshal(capPayload)
+		capReq, cErr := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken), bytes.NewReader(capBody))
+		if cErr == nil {
+			capReq.Header.Set("Content-Type", "application/json")
+			if capResp, doErr := botAPIHTTPClient.Do(capReq); doErr == nil {
+				defer capResp.Body.Close()
+				var capRes struct {
+					Ok          bool   `json:"ok"`
+					Description string `json:"description"`
+				}
+				if json.NewDecoder(capResp.Body).Decode(&capRes) == nil && (capRes.Ok || strings.Contains(capRes.Description, "message is not modified")) {
+					return nil
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("bot api error: %s", res.Description)
 }
 
 // DeleteMessage deletes messages for both PMs/basic groups and supergroups/channels
