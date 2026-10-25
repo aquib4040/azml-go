@@ -619,8 +619,8 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		sentChats := make(map[int64]bool)
 		sentChats[actualDestChatID] = true
 
-		// 0. Ensure message is delivered to original chat (group/channel/PM) where leech command was sent
-		if !sentChats[fromChatID] {
+		// 0. Ensure message is delivered to original chat (only if PM, skip group chats)
+		if !isGroupChat && !sentChats[fromChatID] {
 			sentChats[fromChatID] = true
 			if !copyMessageViaBotAPI(botToken, fromChatID, actualDestChatID, msgID) {
 				_, fErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
@@ -646,7 +646,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 					ChannelID:  chID,
 					AccessHash: telegram.GetChannelAccessHash(chID),
 				}
-				_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+				_, fErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 					FromPeer:   uploadPeer,
 					ToPeer:     logPeer,
 					ID:         []int{msgID},
@@ -667,7 +667,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 					UserID:     opt.UserID,
 					AccessHash: telegram.GetUserAccessHash(opt.UserID),
 				}
-				_, pErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+				_, pErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 					FromPeer:   uploadPeer,
 					ToPeer:     userPeer,
 					ID:         []int{msgID},

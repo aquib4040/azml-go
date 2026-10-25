@@ -505,13 +505,23 @@ func AcquireDownloadQueue(ctx context.Context, uid, name string, size int64, cha
 
 	if queued {
 		log.Printf("[Queue] Task added to QueueDL: %s (UID: %s)", name, uid)
-		qTask := NewQueueTask(uid, name, size, types.StatusQueuedDL, chatID, userID, msgID, cancelFn)
-		GetTaskManager().AddTask(qTask)
+		if existing := GetTaskManager().GetTask(uid); existing != nil {
+			if u, ok := existing.(*UnifiedTask); ok {
+				u.SetStatus(types.StatusQueuedDL, "Sleep v0")
+			}
+		} else {
+			qTask := NewQueueTask(uid, name, size, types.StatusQueuedDL, chatID, userID, msgID, cancelFn)
+			GetTaskManager().AddTask(qTask)
+		}
 
 		select {
 		case <-waitChan:
 			log.Printf("[Queue] Task woken up from QueueDL: %s (UID: %s)", name, uid)
-			GetTaskManager().RemoveTask(uid)
+			if existing := GetTaskManager().GetTask(uid); existing != nil {
+				if u, ok := existing.(*UnifiedTask); ok {
+					u.SetStatus(types.StatusDownloading, "Telegram MTProto")
+				}
+			}
 			return true, nil
 		case <-ctx.Done():
 			queueLock.Lock()
@@ -562,13 +572,23 @@ func AcquireUploadQueue(ctx context.Context, uid, name string, size int64, chatI
 
 	if queued {
 		log.Printf("[Queue] Task added to QueueUp: %s (UID: %s)", name, uid)
-		qTask := NewQueueTask(uid, name, size, types.StatusQueuedUP, chatID, userID, msgID, cancelFn)
-		GetTaskManager().AddTask(qTask)
+		if existing := GetTaskManager().GetTask(uid); existing != nil {
+			if u, ok := existing.(*UnifiedTask); ok {
+				u.SetStatus(types.StatusQueuedUP, "Sleep v0")
+			}
+		} else {
+			qTask := NewQueueTask(uid, name, size, types.StatusQueuedUP, chatID, userID, msgID, cancelFn)
+			GetTaskManager().AddTask(qTask)
+		}
 
 		select {
 		case <-waitChan:
 			log.Printf("[Queue] Task woken up from QueueUp: %s (UID: %s)", name, uid)
-			GetTaskManager().RemoveTask(uid)
+			if existing := GetTaskManager().GetTask(uid); existing != nil {
+				if u, ok := existing.(*UnifiedTask); ok {
+					u.SetStatus(types.StatusUploading, "MTProto")
+				}
+			}
 			return true, nil
 		case <-ctx.Done():
 			queueLock.Lock()

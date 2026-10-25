@@ -855,14 +855,15 @@ func (p *SessionPool) GetNextAvailable(tokens []string, apiID int, apiHash strin
 	return nil, fmt.Errorf("no ready gotd bot sessions available in pool")
 }
 
-// AcquireUploadBot picks a ready worker bot that has verified "Post Messages"
-// admin permissions in the specified dump channel, prioritizing the bot with the lowest active uploads.
+// AcquireUploadBot picks a ready worker bot from the pool, prioritizing the bot with the lowest active uploads.
 func (p *SessionPool) AcquireUploadBot(ctx context.Context, tokens []string, apiID int, apiHash string, dumpChatID int64) *BotSession {
 	if dumpChatID == 0 {
 		return nil
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	var candidates []*BotSession
 	for _, bot := range p.sessions {
 		if !p.IsTokenInvalid(bot.Token) {
@@ -875,22 +876,29 @@ func (p *SessionPool) AcquireUploadBot(ctx context.Context, tokens []string, api
 			}
 		}
 	}
-	p.mu.Unlock()
 
 	if len(candidates) == 0 {
 		return nil
 	}
 
+	rawDumpID := RawChannelID(dumpChatID)
 	var bestBot *BotSession
 	var minUploads int32 = 999999
 
-	for _, bot := range candidates {
-		if bot.CanPostInChannel(ctx, dumpChatID) {
-			current := bot.ActiveUploads.Load()
-			if current < minUploads {
-				minUploads = current
-				bestBot = bot
-			}
+	p.rrIndex = (p.rrIndex + 1) % len(candidates)
+	startIdx := p.rrIndex
+
+	for i := 0; i < len(candidates); i++ {
+		idx := (startIdx + i) % len(candidates)
+		bot := candidates[idx]
+		// Skip if previously confirmed to lack admin post rights
+		if val, ok := bot.canPostCache.Load(rawDumpID); ok && !val.(bool) {
+			continue
+		}
+		current := bot.ActiveUploads.Load()
+		if current < minUploads {
+			minUploads = current
+			bestBot = bot
 		}
 	}
 
