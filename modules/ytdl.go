@@ -42,7 +42,7 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 	cfg := config.Get()
 
 	// Access control
-	if msgText, btn := ext.CheckingAccess(msg.UserID, false, cfg.BotToken, m.userMap); msgText != "" {
+	if msgText, btn := ext.CheckingAccess(msg.UserID, false, telegram.CurrentBotUsername, m.userMap); msgText != "" {
 		var markup tg.ReplyMarkupClass
 		if btn != nil {
 			markup = btn.BuildMenu(1)

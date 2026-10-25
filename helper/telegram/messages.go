@@ -774,17 +774,13 @@ func FetchMessage(ctx context.Context, rawClient *tg.Client, peer tg.InputPeerCl
 		if hash == 0 {
 			hash = GetChannelAccessHash(pChan.ChannelID)
 		}
-		if hash != 0 {
-			res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-				Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
-				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
-			})
+		if hash == 0 {
+			return nil, fmt.Errorf("channel access hash unknown for %d", pChan.ChannelID)
 		}
-		if err != nil || hash == 0 {
-			res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
-				&tg.InputMessageID{ID: msgID},
-			})
-		}
+		res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
+			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+		})
 	} else {
 		res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
 			&tg.InputMessageID{ID: msgID},

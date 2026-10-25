@@ -59,7 +59,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 	cfg := config.Get()
 
 	// Access control & token check
-	if msgText, btn := ext.CheckingAccess(msg.UserID, false, cfg.BotToken, m.userMap); msgText != "" {
+	if msgText, btn := ext.CheckingAccess(msg.UserID, false, telegram.CurrentBotUsername, m.userMap); msgText != "" {
 		var markup tg.ReplyMarkupClass
 		if btn != nil {
 			markup = btn.BuildMenu(1)
@@ -343,16 +343,34 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			}
 		} else if msg.FileName != "" {
 			displayName = msg.FileName
+		} else if msg.IsReply {
+			displayName = "Telegram File"
+		} else {
+			displayName = "Leech Task"
 		}
 	}
+	displayName = filepath.Base(displayName)
 
-	// For HTTP/HTTPS links: probe remote headers to resolve true filename (Content-Disposition) & extension
+	uTask := ext.NewUnifiedTask(taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
+	m.taskMgr.AddTask(uTask)
+
+	// Instantly render the status progress bar so the user gets an immediate (<1s) response
+	if notifyID > 0 {
+		if m.statusMod != nil {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		}
+		text, btn := m.taskMgr.BuildStatusMessage(1)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
+	}
+
+	// For HTTP/HTTPS links: probe remote headers to resolve true filename (Content-Disposition) & extension in background
 	if ext.IsURL(link) && !ext.IsMagnet(link) && !strings.Contains(strings.ToLower(link), ".torrent") {
 		resolvedName, finalURL, resolvedSize, _ := ext.ResolveDownloadMetadata(ctx, link)
 		if resolvedName != "" {
 			if opt.CustomName == "" {
 				opt.CustomName = resolvedName
 				displayName = resolvedName
+				uTask.SetName(resolvedName)
 			}
 		}
 		if finalURL != "" {
@@ -360,21 +378,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		}
 		if msg.FileSize == 0 && resolvedSize > 0 {
 			msg.FileSize = resolvedSize
+			uTask.SetSize(resolvedSize)
 		}
-	}
-
-	displayName = filepath.Base(displayName)
-
-	uTask := ext.NewUnifiedTask(taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
-	m.taskMgr.AddTask(uTask)
-
-	// Instantly render the status progress bar so the user never sees a stuck "Initiating..." message
-	if notifyID > 0 {
-		if m.statusMod != nil {
-			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
-		}
-		text, btn := m.taskMgr.BuildStatusMessage(1)
-		_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
 	}
 
 	defer func() {

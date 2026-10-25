@@ -485,32 +485,18 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				msgCtx.RawMedia = header.ReplyMedia
 			}
 
-			// 2. Target peer (handles channel posts in discussion groups / comments)
-			targetPeer := peer
-			if header.ReplyToPeerID != nil {
-				if rPeer := b.getPeerWithEntities(header.ReplyToPeerID, entities); rPeer != nil {
-					targetPeer = rPeer
-				}
-			}
-
-			// 3. Populate replied message text and media with quick 4s timeout
-			fetchCtx, fetchCancel := context.WithTimeout(ctx, 4*time.Second)
-			if repliedMsg, err := telegram.FetchMessage(fetchCtx, b.rawAPI, targetPeer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
-				msgCtx.ReplyText = repliedMsg.Message
-				if repliedMsg.Media != nil {
-					msgCtx.HasMedia = true
-					msgCtx.RawMedia = repliedMsg.Media
-				}
-			} else if targetPeer != peer {
-				if rMsg, rErr := telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID); rErr == nil && rMsg != nil {
-					msgCtx.ReplyText = rMsg.Message
-					if rMsg.Media != nil {
+			// 2. Fetch replied message directly from this chat with a fast 1.2s timeout if media not already present
+			if msgCtx.RawMedia == nil {
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+				if repliedMsg, err := telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
+					msgCtx.ReplyText = repliedMsg.Message
+					if repliedMsg.Media != nil {
 						msgCtx.HasMedia = true
-						msgCtx.RawMedia = rMsg.Media
+						msgCtx.RawMedia = repliedMsg.Media
 					}
 				}
+				fetchCancel()
 			}
-			fetchCancel()
 		}
 	}
 
