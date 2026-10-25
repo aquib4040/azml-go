@@ -118,7 +118,7 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		Method:  "aria2.getVersion",
 		Params:  []interface{}{},
 	}
-	if _, err := a.call(req); err == nil {
+	if _, err := a.rawCall(req); err == nil {
 		a.started = true
 		return nil
 	}
@@ -129,6 +129,10 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		binName = "studymaterial"
 	} else if _, err := os.Stat("/usr/bin/studymaterial"); err == nil {
 		binName = "/usr/bin/studymaterial"
+	} else if _, err := exec.LookPath("aria2c"); err == nil {
+		binName = "aria2c"
+	} else if _, err := os.Stat("/usr/bin/aria2c"); err == nil {
+		binName = "/usr/bin/aria2c"
 	}
 	defaultTrackers := "udp://tracker.opentrackr.org:1337/announce," +
 		"udp://open.stealth.si:80/announce," +
@@ -173,13 +177,24 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--daemon=true",
 	)
 
-	_ = cmd.Run()
-	time.Sleep(1 * time.Second)
-	a.started = true
+	if err := cmd.Run(); err != nil {
+		log.Printf("[Aria2c] Failed to start daemon (%s): %v", binName, err)
+		return err
+	}
+
+	for i := 0; i < 10; i++ {
+		time.Sleep(300 * time.Millisecond)
+		if _, err := a.rawCall(req); err == nil {
+			a.started = true
+			log.Printf("[Aria2c] Daemon successfully started on port %d", port)
+			return nil
+		}
+	}
+	log.Printf("[Aria2c] Warning: daemon process launched but not yet responding on port %d", port)
 	return nil
 }
 
-func (a *Aria2RPCClient) call(req JSONRPCRequest) (*JSONRPCResponse, error) {
+func (a *Aria2RPCClient) rawCall(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	reqData, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -199,6 +214,19 @@ func (a *Aria2RPCClient) call(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		return nil, fmt.Errorf("aria2 error (%d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 	return &rpcResp, nil
+}
+
+func (a *Aria2RPCClient) call(req JSONRPCRequest) (*JSONRPCResponse, error) {
+	res, err := a.rawCall(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "connect:") {
+			log.Printf("[Aria2c] RPC unreachable (%v), attempting to restart daemon...", err)
+			_ = a.EnsureStarted()
+			return a.rawCall(req)
+		}
+		return nil, err
+	}
+	return res, nil
 }
 
 func (a *Aria2RPCClient) AddURI(link, downloadDir, filename string, headers []string) (string, error) {

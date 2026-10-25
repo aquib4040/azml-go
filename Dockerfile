@@ -15,7 +15,7 @@ ENV GODEBUG="madvdontneed=1"
 
 WORKDIR /usr/src/app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg mediainfo speedtest-cli curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends aria2 ffmpeg mediainfo speedtest-cli curl && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 

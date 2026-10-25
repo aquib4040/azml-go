@@ -295,24 +295,17 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		return
 	}
 
-	// Try DDL API for Telegram files first to download via 16-connection Aria2c
-	if cfg.DDLAPI != "" {
-		var tgChannelID int64
-		var tgMsgID int
+	// Try DDL API for Telegram links (t.me/... or t.me/c/...) if a link was provided
+	if cfg.DDLAPI != "" && link != "" {
 		if cid, mid, ok := ext.ParseTelegramLink(link); ok {
-			tgChannelID = cid
+			tgChannelID := cid
 			if tgChannelID == 0 {
 				tgChannelID = msg.ChatID
 			}
-			tgMsgID = mid
-		} else if msg.IsReply && msg.ReplyToID != 0 {
-			tgChannelID = msg.ChatID
-			tgMsgID = msg.ReplyToID
-		}
-
-		if tgMsgID != 0 {
-			if ddlURL, err := ext.TryDDLAPI(ctx, tgChannelID, tgMsgID); err == nil && ddlURL != "" {
-				link = ddlURL
+			if mid != 0 {
+				if ddlURL, err := ext.TryDDLAPI(ctx, tgChannelID, mid); err == nil && ddlURL != "" {
+					link = ddlURL
+				}
 			}
 		}
 	}
