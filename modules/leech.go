@@ -470,42 +470,26 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					uTask.SetSize(doc.Size)
 					uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
 
-					dl := tdDownloader.NewDownloader().WithPartSize(512 * 1024)
+					chunkDL := downloader.NewTelegramChunkDownloader(m.rawAPI)
 					loc := doc.AsInputDocumentFileLocation("")
 					if loc != nil {
-						stopProgress := make(chan struct{})
-						go func() {
-							ticker := time.NewTicker(1 * time.Second)
-							defer ticker.Stop()
-							var lastBytes int64
-							lastTime := time.Now()
-							for {
-								select {
-								case <-stopProgress:
-									return
-								case <-ticker.C:
-									if fi, statErr := os.Stat(destPath); statErr == nil {
-										cur := fi.Size()
-										now := time.Now()
-										elapsed := now.Sub(lastTime).Seconds()
-										if elapsed > 0 {
-											speed := float64(cur-lastBytes) / elapsed
-											rem := doc.Size - cur
-											eta := "-"
-											if speed > 0 && rem > 0 {
-												eta = ext.GetReadableTime(int64(float64(rem) / speed))
-											}
-											uTask.SetProgress(cur, doc.Size, speed, eta)
-											lastBytes = cur
-											lastTime = now
+						refreshRef := func() ([]byte, error) {
+							if msg.IsReply && msg.ReplyToID > 0 {
+								rMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, msg.ReplyToID)
+								if err == nil && rMsg != nil {
+									if dMedia, ok := rMsg.Media.(*tg.MessageMediaDocument); ok {
+										if dDoc, ok := dMedia.Document.(*tg.Document); ok {
+											return dDoc.FileReference, nil
 										}
 									}
 								}
 							}
-						}()
+							return nil, fmt.Errorf("failed to refresh file reference")
+						}
 
-						_, err := dl.Download(m.rawAPI, loc).WithThreads(8).ToPath(ctx, destPath)
-						close(stopProgress)
+						err := chunkDL.DownloadToFile(ctx, loc, doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
+							uTask.SetProgress(curr, total, speed, eta)
+						}, refreshRef)
 
 						if err == nil {
 							downloadedPath = destPath
