@@ -63,9 +63,11 @@ type BotSession struct {
 	cooling         atomic.Int64
 	InFlightChunks  atomic.Int32
 	ActiveDownloads atomic.Int32
+	ActiveUploads   atomic.Int32
 	TotalDownloads  atomic.Int64
-	accessCache     sync.Map // int64 (raw channel ID) → int64 (access hash)
-	docCache        sync.Map // string ("chatID_msgID") → *CachedDocument
+	accessCache     sync.Map   // int64 (raw channel ID) → int64 (access hash)
+	canPostCache    sync.Map   // int64 (raw channel ID) → bool
+	docCache        sync.Map   // string ("chatID_msgID") → *CachedDocument
 	chunkMu         sync.Mutex // Serializes chunk downloads on this bot session
 	lastReqTime     time.Time  // Anti-Flood pacing timestamp (protected by chunkMu)
 	pool            *SessionPool
@@ -445,6 +447,53 @@ func (bot *BotSession) ResolveChannel(ctx context.Context, chatID int64) (*tg.In
 	return nil, fmt.Errorf("could not resolve channel %d access_hash", chatID)
 }
 
+func (bot *BotSession) ReleaseUpload() {
+	if bot != nil {
+		bot.ActiveUploads.Add(-1)
+	}
+}
+
+// CanPostInChannel checks if this bot has posting permissions in the given channel.
+func (bot *BotSession) CanPostInChannel(ctx context.Context, chatID int64) bool {
+	rawID := RawChannelID(chatID)
+	if val, ok := bot.canPostCache.Load(rawID); ok {
+		return val.(bool)
+	}
+
+	inputChan, err := bot.ResolveChannel(ctx, chatID)
+	if err != nil || inputChan == nil {
+		bot.canPostCache.Store(rawID, false)
+		return false
+	}
+
+	res, err := bot.API.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChan})
+	if err != nil || res == nil {
+		bot.canPostCache.Store(rawID, false)
+		return false
+	}
+
+	var chats []tg.ChatClass
+	switch c := res.(type) {
+	case *tg.MessagesChats:
+		chats = c.Chats
+	case *tg.MessagesChatsSlice:
+		chats = c.Chats
+	}
+
+	canPost := false
+	for _, chat := range chats {
+		if ch, ok := chat.(*tg.Channel); ok && ch.ID == rawID {
+			if ch.Creator || ch.AdminRights.PostMessages {
+				canPost = true
+				break
+			}
+		}
+	}
+
+	bot.canPostCache.Store(rawID, canPost)
+	return canPost
+}
+
 // ResolveDocument resolves channel message document and caches it for this specific bot session
 func (bot *BotSession) ResolveDocument(
 	ctx context.Context,
@@ -804,6 +853,53 @@ func (p *SessionPool) GetNextAvailable(tokens []string, apiID int, apiHash strin
 
 	p.mu.Unlock()
 	return nil, fmt.Errorf("no ready gotd bot sessions available in pool")
+}
+
+// AcquireUploadBot picks a ready worker bot that has verified "Post Messages"
+// admin permissions in the specified dump channel, prioritizing the bot with the lowest active uploads.
+func (p *SessionPool) AcquireUploadBot(ctx context.Context, tokens []string, apiID int, apiHash string, dumpChatID int64) *BotSession {
+	if dumpChatID == 0 {
+		return nil
+	}
+
+	p.mu.Lock()
+	var candidates []*BotSession
+	for _, bot := range p.sessions {
+		if !p.IsTokenInvalid(bot.Token) {
+			select {
+			case <-bot.ready:
+				if bot.readyErr == nil && !bot.IsCooling() {
+					candidates = append(candidates, bot)
+				}
+			default:
+			}
+		}
+	}
+	p.mu.Unlock()
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	var bestBot *BotSession
+	var minUploads int32 = 999999
+
+	for _, bot := range candidates {
+		if bot.CanPostInChannel(ctx, dumpChatID) {
+			current := bot.ActiveUploads.Load()
+			if current < minUploads {
+				minUploads = current
+				bestBot = bot
+			}
+		}
+	}
+
+	if bestBot != nil {
+		bestBot.ActiveUploads.Add(1)
+		return bestBot
+	}
+
+	return nil
 }
 
 // WarmupTokens starts background authentication of multi-worker tokens with controlled concurrency

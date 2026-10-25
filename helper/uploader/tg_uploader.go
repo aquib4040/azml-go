@@ -241,6 +241,19 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	const twoGB = int64(2097152000)
 	var clientToUse *tg.Client
+	var uploadBotSession *pool.BotSession
+
+	effectiveDumpChatID := opt.DumpChatID
+	if effectiveDumpChatID == 0 {
+		effectiveDumpChatID = u.dumpChatID
+	}
+	cfg := config.Get()
+	if effectiveDumpChatID == 0 && cfg != nil {
+		effectiveDumpChatID = cfg.DumpChatID
+	}
+	if effectiveDumpChatID == 0 && cfg != nil {
+		effectiveDumpChatID = cfg.LeechLogID
+	}
 
 	if fileSize > twoGB {
 		if u.userClient == nil || u.userUp == nil {
@@ -248,10 +261,24 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 		clientToUse = u.userClient
 	} else {
-		// Use main bot client for uploads <= 2GB.
-		// Main bot is guaranteed to have membership in the target group chat and admin post permissions in dump channels.
-		// Parallel chunk uploading (8 threads) is handled within the session via MTProto upload.saveBigFilePart.
-		clientToUse = u.botClient
+		// Multi-task multi-bot upload load balancing:
+		// If a Dump Channel is configured and SessionPool has active sessions,
+		// pick an available worker bot that has verified "Post Messages" admin rights in the Dump Channel.
+		if effectiveDumpChatID != 0 && u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 {
+			if wBot := u.sessPool.AcquireUploadBot(ctx, cfg.WorkerBotTokens, cfg.TelegramAPI, cfg.TelegramHash, effectiveDumpChatID); wBot != nil {
+				uploadBotSession = wBot
+				clientToUse = wBot.API
+				log.Printf("[AZML-Go Uploader] Multi-bot worker ...%s acquired for upload task (active uploads: %d)", wBot.SafeSuffix(), wBot.ActiveUploads.Load())
+			}
+		}
+
+		if clientToUse == nil {
+			clientToUse = u.botClient
+			log.Printf("[AZML-Go Uploader] Main Bot selected for upload task")
+		}
+	}
+	if uploadBotSession != nil {
+		defer uploadBotSession.ReleaseUpload()
 	}
 
 	uploadStart := time.Now()
@@ -316,14 +343,14 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var errOnce sync.Once
 		var firstErr error
 
-		numWorkers := 8
+		numWorkers := 16
 		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
 			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 				numWorkers = val
 			}
 		}
-		if numWorkers > 16 {
-			numWorkers = 16
+		if numWorkers > 24 {
+			numWorkers = 24
 		}
 		if int(totalParts) < numWorkers {
 			numWorkers = int(totalParts)
@@ -484,19 +511,22 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	uploadPeer := peer
 	actualDestChatID := fromChatID
 
-	effectiveDumpChatID := opt.DumpChatID
-	if effectiveDumpChatID == 0 {
-		effectiveDumpChatID = u.dumpChatID
-	}
-	cfg := config.Get()
-	if effectiveDumpChatID == 0 && cfg != nil {
-		effectiveDumpChatID = cfg.DumpChatID
-	}
-	if effectiveDumpChatID == 0 && cfg != nil {
-		effectiveDumpChatID = cfg.LeechLogID
-	}
 
-	if effectiveDumpChatID != 0 {
+	if uploadBotSession != nil && effectiveDumpChatID != 0 {
+		rawDumpID := pool.RawChannelID(effectiveDumpChatID)
+		dumpHash := telegram.ResolveChannelAccessHash(ctx, clientToUse, effectiveDumpChatID)
+		if dumpHash == 0 {
+			dumpHash = telegram.GetChannelAccessHash(rawDumpID)
+		}
+		if dumpHash != 0 {
+			uploadPeer = &tg.InputPeerChannel{
+				ChannelID:  rawDumpID,
+				AccessHash: dumpHash,
+			}
+			actualDestChatID = effectiveDumpChatID
+			log.Printf("[AZML-Go Uploader] Multi-bot worker uploading to dump channel %d (dest chat %d)", effectiveDumpChatID, fromChatID)
+		}
+	} else if effectiveDumpChatID != 0 {
 		rawDumpID := pool.RawChannelID(effectiveDumpChatID)
 		dumpHash := telegram.ResolveChannelAccessHash(ctx, clientToUse, effectiveDumpChatID)
 		if dumpHash == 0 {
@@ -551,8 +581,8 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		if sendErr == nil {
 			break
 		}
-		// Fallback to command peer if sending to preferred peer failed
-		if uploadPeer != peer && attempt == 0 {
+		// Fallback to command peer if sending to preferred peer failed (only for Main Bot)
+		if uploadBotSession == nil && uploadPeer != peer && attempt == 0 {
 			log.Printf("[AZML-Go Uploader] Upload to preferred peer failed (%v), falling back to command peer", sendErr)
 			uploadPeer = peer
 			actualDestChatID = fromChatID
