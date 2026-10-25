@@ -204,6 +204,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 			"┠ <code>-p</code> — %s\n"+
 			"┠ <code>-ss</code> — %s\n"+
 			"┠ <code>-d</code> — %s\n"+
+			"┠ <code>-med</code> — %s\n"+
 			"┠ <code>-ud</code> — %s\n"+
 			"┖ <code>-st</code> — %s",
 			telegram.ToSmallCaps("Leech Command Usage"),
@@ -216,6 +217,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 			telegram.ToSmallCaps("Extraction Password"),
 			telegram.ToSmallCaps("Generate Screenshots"),
 			telegram.ToSmallCaps("Upload as Document"),
+			telegram.ToSmallCaps("Upload as Media"),
 			telegram.ToSmallCaps("Custom Dump Chat ID"),
 			telegram.ToSmallCaps("Extract Video Streams"))
 		_, _ = m.sender.SendMessage(ctx, peer, helpMsg, msg.MessageID, nil)
@@ -1058,8 +1060,23 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		if user != nil && user.AutoThumb {
 			autoThumbEnabled = true
 		}
+
+		// Effective upload as document resolution:
+		// 1. Bot-wide default (cfg.AsDocument, default true)
+		// 2. User setting overrides if user exists (user.AsDoc)
+		// 3. Command flags (-d/-doc forces document, -m/-med/-media forces media)
+		asDoc := cfg.AsDocument
+		if user != nil {
+			asDoc = user.AsDoc
+		}
+		if opt.AsDoc {
+			asDoc = true
+		} else if opt.AsMedia {
+			asDoc = false
+		}
+
 		if customThumb == "" && autoThumbEnabled {
-			if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, opt.AsDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
+			if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, asDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
 				customThumb = tmdbThumb
 			}
 		}
@@ -1111,7 +1128,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				Caption:    partCaption,
 				ThumbPath:  thumbPath,
 				CoverPath:  coverPath,
-				AsDoc:      opt.AsDoc || cfg.AsDocument,
+				AsDoc:      asDoc,
 				DumpChatID: dumpID,
 				LogChatID:  cfg.LeechLogID,
 				UserID:     msg.UserID,
@@ -1261,7 +1278,8 @@ func splitArgsRespectingQuotes(s string) []string {
 func isLeechFlag(tok string) bool {
 	switch tok {
 	case "-b", "-bulk", "-z", "-zip", "-e", "-extract", "-uz", "-unzip",
-		"-d", "-asdoc", "-st", "-streams", "-n", "-name", "-p", "-password",
+		"-d", "-doc", "-asdoc", "-m", "-med", "-media", "-asmedia",
+		"-st", "-streams", "-n", "-name", "-p", "-password",
 		"-pssw", "-ss", "-screenshots", "-ud", "-dump", "-ff", "-i", "-s", "-select":
 		return true
 	default:
@@ -1284,8 +1302,10 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 			opt.IsZip = true
 		case "-e", "-extract", "-uz", "-unzip":
 			opt.IsExtract = true
-		case "-d", "-asdoc":
+		case "-d", "-doc", "-asdoc":
 			opt.AsDoc = true
+		case "-m", "-med", "-media", "-asmedia":
+			opt.AsMedia = true
 		case "-st", "-streams":
 			opt.ExtractStrm = true
 		case "-n", "-name":

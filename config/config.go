@@ -138,7 +138,7 @@ func LoadConfig(path string) (*Config, error) {
 		AutoDeleteMessageDuration: getEnvInt("AUTO_DELETE_MESSAGE_DURATION", 60),
 		LeechSplitSize:            getEnvInt64("LEECH_SPLIT_SIZE", 2097152000), // ~2GB
 		EqualSplits:               getEnvBool("EQUAL_SPLITS", false),
-		AsDocument:                getEnvBool("AS_DOCUMENT", false),
+		AsDocument:                getEnvBool("AS_DOCUMENT", true),
 		MediaGroup:                getEnvBool("MEDIA_GROUP", false),
 		BotPM:                     getEnvBool("BOT_PM", false),
 		CapFont:                   getEnv("CAP_FONT", "code"),

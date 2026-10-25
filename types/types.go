@@ -92,6 +92,7 @@ type LeechOptions struct {
 	ExtractStrm bool
 	FFmpegKey   string
 	AsDoc       bool
+	AsMedia     bool
 	UserDump    int64
 	Headers     string
 	Username    string
@@ -151,6 +152,7 @@ func (m *SafeUserMap) GetOrCreate(userID int64) *UserSettings {
 		UserID:       userID,
 		Autorename:   true,
 		RenameMethod: "auto",
+		AsDoc:        true,
 		Metadata:     make(map[string]string),
 	}
 	m.users[userID] = u

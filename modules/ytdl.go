@@ -212,8 +212,13 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		autoThumbEnabled = true
 	}
 
+	asDoc := cfg.AsDocument
+	if user != nil {
+		asDoc = user.AsDoc
+	}
+
 	if customThumb == "" && autoThumbEnabled {
-		if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, cfg.AsDocument, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
+		if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, asDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
 			customThumb = tmdbThumb
 		}
 	}
@@ -241,7 +246,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		Caption:    caption,
 		ThumbPath:  thumbPath,
 		CoverPath:  coverPath,
-		AsDoc:      cfg.AsDocument,
+		AsDoc:      asDoc,
 		DumpChatID: dumpID,
 		LogChatID:  cfg.LeechLogID,
 		UserID:     msg.UserID,

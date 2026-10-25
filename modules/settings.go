@@ -820,7 +820,7 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 		u.AutoThumb = false
 		u.EqualSplits = false
 		u.MediaGroup = false
-		u.AsDoc = false
+		u.AsDoc = config.Get().AsDocument
 		if u.CustomThumb != "" {
 			_ = os.Remove(u.CustomThumb)
 			u.CustomThumb = ""

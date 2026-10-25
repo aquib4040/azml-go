@@ -451,6 +451,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		File:       uploadedFile,
 		MimeType:   mimeType,
 		Attributes: attributes,
+		ForceFile:  opt.AsDoc,
 	}
 	if thumbFile != nil {
 		inputMedia.SetThumb(thumbFile)
