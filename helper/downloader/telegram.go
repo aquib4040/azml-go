@@ -49,11 +49,9 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 		return fmt.Errorf("invalid file size %d for chunk download", fileSize)
 	}
 
-	// Optimal MTProto chunk size: 512KB for standard, 1024KB (1MB) for files >= 50MB
-	partSize := int64(512 * 1024)
-	if fileSize >= 50*1024*1024 {
-		partSize = 1024 * 1024
-	}
+	// MTProto optimal chunk size: 1MB (1048576) — maximum allowed by Telegram API.
+	// Must be divisible by 4096 and a power of 2 up to 1MB.
+	const partSize int64 = 1048576 // 1 MB
 
 	totalParts := int((fileSize + partSize - 1) / partSize)
 	if totalParts <= 0 {
@@ -81,6 +79,18 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 		numWorkers = totalParts
 	}
 
+	// Pre-compute the actual byte count for each part (last part may be smaller)
+	partActualSize := make([]int64, totalParts)
+	for i := 0; i < totalParts; i++ {
+		off := int64(i) * partSize
+		remaining := fileSize - off
+		if remaining > partSize {
+			partActualSize[i] = partSize
+		} else {
+			partActualSize[i] = remaining
+		}
+	}
+
 	tasks := make(chan int, totalParts)
 	for i := 0; i < totalParts; i++ {
 		tasks <- i
@@ -92,8 +102,8 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 	var firstErr error
 
 	startTime := time.Now()
-	var lastBytes int64
-	var lastTime = startTime
+	var lastReportBytes int64
+	var lastReportTime = startTime
 	var trackerMu sync.Mutex
 
 	reportProgress := func(curr int64) {
@@ -104,9 +114,9 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 		defer trackerMu.Unlock()
 
 		now := time.Now()
-		elapsed := now.Sub(lastTime).Seconds()
+		elapsed := now.Sub(lastReportTime).Seconds()
 		if elapsed >= 0.5 || curr == fileSize {
-			delta := curr - lastBytes
+			delta := curr - lastReportBytes
 			speed := 0.0
 			if elapsed > 0 {
 				speed = float64(delta) / elapsed
@@ -118,10 +128,13 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 				eta = ext.GetReadableTime(etaSec)
 			}
 			onProgress(curr, fileSize, speed, eta)
-			lastBytes = curr
-			lastTime = now
+			lastReportBytes = curr
+			lastReportTime = now
 		}
 	}
+
+	log.Printf("[TG Chunk DL] Starting download: %s (%s), %d parts, %d workers",
+		filepath.Base(destPath), ext.GetReadableFileSize(fileSize), totalParts, numWorkers)
 
 	var wg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
@@ -135,17 +148,26 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 				}
 
 				offset := int64(partIndex) * partSize
-				limit := int(partSize)
-				if offset+int64(limit) > fileSize {
-					limit = int(fileSize - offset)
-				}
+				actualBytes := partActualSize[partIndex]
 
-				data, partErr := d.getPartWithRetry(ctx, loc, offset, limit, partIndex, totalParts, refreshRef)
+				// IMPORTANT: Always request full partSize as limit.
+				// Telegram API requires limit to be a valid power-of-2 multiple of 4096 (up to 1MB).
+				// For the last chunk, the server returns only the remaining bytes even if we request more.
+				// Sending the actual remaining size (e.g. 73123) causes LIMIT_INVALID error.
+				requestLimit := int(partSize)
+
+				data, partErr := d.getPartWithRetry(ctx, loc, offset, requestLimit, partIndex, totalParts, refreshRef)
 				if partErr != nil {
 					errOnce.Do(func() {
 						firstErr = fmt.Errorf("download failed at part %d/%d (offset %d): %w", partIndex+1, totalParts, offset, partErr)
 					})
 					return
+				}
+
+				// Trim to actual expected size for the last part (server may return exactly what we need,
+				// but if it returns more padding, we must not write past fileSize)
+				if int64(len(data)) > actualBytes {
+					data = data[:actualBytes]
 				}
 
 				if _, wErr := out.WriteAt(data, offset); wErr != nil {
@@ -193,9 +215,9 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 		default:
 		}
 
-		partCtx, partCancel := context.WithTimeout(ctx, 45*time.Second)
+		partCtx, partCancel := context.WithTimeout(ctx, 60*time.Second)
 		res, err := d.client.UploadGetFile(partCtx, &tg.UploadGetFileRequest{
-			Precise:      true,
+			Precise:      false,
 			CDNSupported: false,
 			Location:     loc,
 			Offset:       offset,
@@ -206,33 +228,35 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 		if err == nil {
 			switch f := res.(type) {
 			case *tg.UploadFile:
+				if len(f.Bytes) == 0 {
+					return nil, fmt.Errorf("empty chunk received from Telegram (len=0)")
+				}
 				return f.Bytes, nil
 			default:
 				return nil, fmt.Errorf("unexpected file response %T", res)
 			}
 		}
 
-		// 1. Check FloodWait
-		if waitSec, ok := tgerr.AsFloodWait(err); ok {
-			waitTime := waitSec
-			if waitTime < 1*time.Second {
-				waitTime = 1 * time.Second
+		// 1. FloodWait — pause only this worker, don't kill the download
+		if waitDur, ok := tgerr.AsFloodWait(err); ok {
+			if waitDur < 1*time.Second {
+				waitDur = 1 * time.Second
 			}
-			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
-			log.Printf("[TG Chunk DL] Part %d/%d got FloodWait %v. Worker pausing and retrying (attempt %d/%d)...",
-				partIndex+1, totalParts, waitTime, attempt, maxAttempts)
+			jitter := time.Duration(rand.Intn(500)) * time.Millisecond
+			log.Printf("[TG Chunk DL] Part %d/%d FloodWait %v (attempt %d/%d)",
+				partIndex+1, totalParts, waitDur, attempt, maxAttempts)
 
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(waitTime + jitter):
+			case <-time.After(waitDur + jitter):
 			}
 			continue
 		}
 
-		// 2. Check File Reference Expired
+		// 2. File reference expired — refresh and retry
 		if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") && refreshRef != nil {
-			log.Printf("[TG Chunk DL] File reference expired at part %d/%d. Refreshing reference...", partIndex+1, totalParts)
+			log.Printf("[TG Chunk DL] File reference expired at part %d/%d, refreshing...", partIndex+1, totalParts)
 			if newRef, rErr := refreshRef(); rErr == nil && len(newRef) > 0 {
 				if docLoc, ok := loc.(*tg.InputDocumentFileLocation); ok {
 					docLoc.FileReference = newRef
@@ -245,13 +269,13 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 			return nil, ctx.Err()
 		}
 
-		// 3. Transient error or timeout: Exponential backoff with jitter
+		// 3. Transient error — exponential backoff with jitter
 		backoff := time.Duration(attempt) * 500 * time.Millisecond
-		if backoff > 4*time.Second {
-			backoff = 4 * time.Second
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
 		}
-		jitter := time.Duration(rand.Intn(300)) * time.Millisecond
-		log.Printf("[TG Chunk DL] Part %d/%d transient error (%v). Retrying in %v (attempt %d/%d)...",
+		jitter := time.Duration(rand.Intn(400)) * time.Millisecond
+		log.Printf("[TG Chunk DL] Part %d/%d error: %v. Retrying in %v (attempt %d/%d)",
 			partIndex+1, totalParts, err, backoff+jitter, attempt, maxAttempts)
 
 		select {
