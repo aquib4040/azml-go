@@ -2,8 +2,7 @@ version: "3.8"
 
 services:
   azml-go:
-    container_name: azml-go
-    image: aquib4040/azml:go
+    build: .
     restart: unless-stopped
     ports:
       - "23434:23434"

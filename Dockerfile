@@ -1,4 +1,4 @@
-FROM golang:alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /usr/src/app
 
@@ -9,13 +9,27 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /usr/local/bin/azml-go .
 
-FROM aquib4040/azml:go
+FROM ubuntu:22.04
 
-ENV GODEBUG="madvdontneed=1"
+ENV DEBIAN_FRONTEND=noninteractive \
+    GODEBUG="madvdontneed=1"
 
 WORKDIR /usr/src/app
 
-RUN apt-get update && apt-get install -y --no-install-recommends aria2 ffmpeg mediainfo speedtest-cli curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    aria2 \
+    ffmpeg \
+    mediainfo \
+    p7zip-full \
+    speedtest-cli \
+    curl \
+    git \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
