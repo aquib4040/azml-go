@@ -233,10 +233,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	if user != nil && user.DumpChatID != 0 {
 		dumpID = user.DumpChatID
 	}
-	botPM := cfg.BotPM
-	if user != nil && user.BotPM {
-		botPM = true
-	}
+	botPM := cfg.BotPM || (user != nil && user.BotPM) || (msg.ChatID != msg.UserID)
 
 	upOpt := uploader.UploadOptions{
 		FilePath:   downloadedFile,

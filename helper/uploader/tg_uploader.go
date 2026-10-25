@@ -466,8 +466,40 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		plainCaption, captionEntities = telegram.ParseFormatting(plainCaption)
 	}
 
+	fromChatID := telegram.PeerToChatID(peer)
+	isGroupChat := (fromChatID != opt.UserID)
+
+	uploadPeer := peer
+	actualDestChatID := fromChatID
+
+	if isGroupChat {
+		// Prefer uploading directly to LeechLogID if its access hash is known
+		if opt.LogChatID != 0 {
+			chID := getChannelID(opt.LogChatID)
+			hash := telegram.GetChannelAccessHash(chID)
+			if hash != 0 {
+				uploadPeer = &tg.InputPeerChannel{
+					ChannelID:  chID,
+					AccessHash: hash,
+				}
+				actualDestChatID = opt.LogChatID
+			}
+		}
+		// If LeechLogID has no cached access hash, prefer uploading directly to User PM
+		if uploadPeer == peer && opt.UserID != 0 {
+			uHash := telegram.GetUserAccessHash(opt.UserID)
+			if uHash != 0 {
+				uploadPeer = &tg.InputPeerUser{
+					UserID:     opt.UserID,
+					AccessHash: uHash,
+				}
+				actualDestChatID = opt.UserID
+			}
+		}
+	}
+
 	req := &tg.MessagesSendMediaRequest{
-		Peer:     peer,
+		Peer:     uploadPeer,
 		Media:    inputMedia,
 		Message:  plainCaption,
 		Entities: captionEntities,
@@ -481,6 +513,14 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		if sendErr == nil {
 			break
 		}
+		// Fallback to command peer if sending to preferred peer failed
+		if uploadPeer != peer && attempt == 0 {
+			log.Printf("[AZML-Go Uploader] Upload to preferred peer failed (%v), falling back to command peer", sendErr)
+			uploadPeer = peer
+			actualDestChatID = fromChatID
+			req.Peer = peer
+			continue
+		}
 		errStr := sendErr.Error()
 		if strings.Contains(errStr, "engine was closed") || strings.Contains(errStr, "engine forcibly closed") ||
 			strings.Contains(errStr, "connection") || strings.Contains(errStr, "reset") ||
@@ -493,10 +533,10 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		break
 	}
 	if sendErr != nil {
-		log.Printf("[AZML-Go Uploader] MessagesSendMedia FAILED for %s (%d bytes) to peer %T: %v", opt.FileName, fileSize, peer, sendErr)
+		log.Printf("[AZML-Go Uploader] MessagesSendMedia FAILED for %s (%d bytes) to peer %T: %v", opt.FileName, fileSize, uploadPeer, sendErr)
 		return nil, fmt.Errorf("failed to send uploaded media: %v", sendErr)
 	}
-	log.Printf("[AZML-Go Uploader] Successfully sent uploaded media for %s to peer %T!", opt.FileName, peer)
+	log.Printf("[AZML-Go Uploader] Successfully sent uploaded media for %s to peer %T!", opt.FileName, uploadPeer)
 
 	msgID := telegram.ExtractMessageID(res)
 	if msgID > 0 {
@@ -508,44 +548,22 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		if botToken == "" {
 			botToken = os.Getenv("BOT_TOKEN")
 		}
-		fromChatID := telegram.PeerToChatID(peer)
 
 		sentChats := make(map[int64]bool)
-		sentChats[fromChatID] = true
+		sentChats[actualDestChatID] = true
 
-		if opt.DumpChatID != 0 && !sentChats[opt.DumpChatID] {
-			dumpChatID := opt.DumpChatID
-			sentChats[dumpChatID] = true
-			if !copyMessageViaBotAPI(botToken, dumpChatID, fromChatID, msgID) {
-				chID := getChannelID(dumpChatID)
-				dumpPeer := &tg.InputPeerChannel{
-					ChannelID:  chID,
-					AccessHash: telegram.GetChannelAccessHash(chID),
-				}
-				_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer:   peer,
-					ToPeer:     dumpPeer,
-					ID:         []int{msgID},
-					RandomID:   []int64{time.Now().UnixNano() + 1},
-					DropAuthor: true,
-				})
-				if fErr != nil {
-					log.Printf("[AZML-Go Uploader] Forward to dump failed: %v", fErr)
-				}
-			}
-		}
-
+		// 1. Send to Leech Log ID (if configured and not already sent there)
 		if opt.LogChatID != 0 && !sentChats[opt.LogChatID] {
 			logChatID := opt.LogChatID
 			sentChats[logChatID] = true
-			if !copyMessageViaBotAPI(botToken, logChatID, fromChatID, msgID) {
+			if !copyMessageViaBotAPI(botToken, logChatID, actualDestChatID, msgID) {
 				chID := getChannelID(logChatID)
 				logPeer := &tg.InputPeerChannel{
 					ChannelID:  chID,
 					AccessHash: telegram.GetChannelAccessHash(chID),
 				}
 				_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer:   peer,
+					FromPeer:   uploadPeer,
 					ToPeer:     logPeer,
 					ID:         []int{msgID},
 					RandomID:   []int64{time.Now().UnixNano() + 2},
@@ -557,14 +575,16 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			}
 		}
 
-		if opt.BotPM && opt.UserID != 0 && !sentChats[opt.UserID] {
+		// 2. Send to Bot PM (User PM) - always ensure user gets the file in PM
+		if opt.UserID != 0 && !sentChats[opt.UserID] {
 			sentChats[opt.UserID] = true
-			if !copyMessageViaBotAPI(botToken, opt.UserID, fromChatID, msgID) {
+			if !copyMessageViaBotAPI(botToken, opt.UserID, actualDestChatID, msgID) {
 				userPeer := &tg.InputPeerUser{
-					UserID: opt.UserID,
+					UserID:     opt.UserID,
+					AccessHash: telegram.GetUserAccessHash(opt.UserID),
 				}
 				_, pErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer:   peer,
+					FromPeer:   uploadPeer,
 					ToPeer:     userPeer,
 					ID:         []int{msgID},
 					RandomID:   []int64{time.Now().UnixNano() + 3},
@@ -573,6 +593,52 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 				if pErr != nil {
 					log.Printf("[AZML-Go Uploader] Forward to user PM (%d) failed: %v", opt.UserID, pErr)
 				}
+			}
+		}
+
+		// 3. Send to Dump Chat ID if configured
+		if opt.DumpChatID != 0 && !sentChats[opt.DumpChatID] {
+			dumpChatID := opt.DumpChatID
+			sentChats[dumpChatID] = true
+			if !copyMessageViaBotAPI(botToken, dumpChatID, actualDestChatID, msgID) {
+				chID := getChannelID(dumpChatID)
+				dumpPeer := &tg.InputPeerChannel{
+					ChannelID:  chID,
+					AccessHash: telegram.GetChannelAccessHash(chID),
+				}
+				_, fErr := clientToUse.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+					FromPeer:   uploadPeer,
+					ToPeer:     dumpPeer,
+					ID:         []int{msgID},
+					RandomID:   []int64{time.Now().UnixNano() + 1},
+					DropAuthor: true,
+				})
+				if fErr != nil {
+					log.Printf("[AZML-Go Uploader] Forward to dump failed: %v", fErr)
+				}
+			}
+		}
+
+		// 4. If uploaded to group chat as fallback, delete it from group chat so GC never keeps the file
+		if isGroupChat && actualDestChatID == fromChatID {
+			switch p := peer.(type) {
+			case *tg.InputPeerChannel:
+				accessHash := p.AccessHash
+				if accessHash == 0 {
+					accessHash = telegram.GetChannelAccessHash(p.ChannelID)
+				}
+				_, _ = clientToUse.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+					Channel: &tg.InputChannel{
+						ChannelID:  p.ChannelID,
+						AccessHash: accessHash,
+					},
+					ID: []int{msgID},
+				})
+			default:
+				_, _ = clientToUse.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+					Revoke: true,
+					ID:     []int{msgID},
+				})
 			}
 		}
 	}

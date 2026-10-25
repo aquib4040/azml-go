@@ -344,8 +344,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		if resolvedName != "" {
 			if opt.CustomName == "" {
 				opt.CustomName = resolvedName
+				displayName = resolvedName
 			}
-			displayName = resolvedName
 		}
 		if finalURL != "" {
 			link = finalURL
@@ -457,7 +457,11 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 						}
 					}
 					if opt.CustomName != "" {
+						origExt := filepath.Ext(fileName)
 						fileName = opt.CustomName
+						if filepath.Ext(fileName) == "" && origExt != "" {
+							fileName += origExt
+						}
 					}
 					fileName = strings.ReplaceAll(fileName, "/", "_")
 					fileName = strings.ReplaceAll(fileName, "\\", "_")
@@ -1099,10 +1103,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				partCaption += fmt.Sprintf("\n\n◈ <a href=\"%s\">Screenshots</a>", ssLinks[0])
 			}
 
-			botPM := cfg.BotPM
-			if user != nil && user.BotPM {
-				botPM = true
-			}
+			botPM := cfg.BotPM || (user != nil && user.BotPM) || (msg.ChatID != msg.UserID)
 
 			upOpt := uploader.UploadOptions{
 				FilePath:   part,
@@ -1182,10 +1183,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 	sb.WriteString(fmt.Sprintf("└── <b>By:</b> %s\n\n", userTag))
 
-	botPM := cfg.BotPM
-	if user != nil && user.BotPM {
-		botPM = true
-	}
+	botPM := cfg.BotPM || (user != nil && user.BotPM) || (msg.ChatID != msg.UserID)
 	if botPM {
 		sb.WriteString("➲ <i>File(s) have been Sent to Bot PM (Private)</i>\n")
 	} else {
@@ -1267,7 +1265,7 @@ func isLeechFlag(tok string) bool {
 		"-pssw", "-ss", "-screenshots", "-ud", "-dump", "-ff", "-i", "-s", "-select":
 		return true
 	default:
-		return strings.HasPrefix(tok, "-")
+		return false
 	}
 }
 
@@ -1294,7 +1292,7 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 			var nameParts []string
 			for i+1 < len(tokens) {
 				nextTok := tokens[i+1]
-				if isLeechFlag(nextTok) || strings.HasPrefix(nextTok, "http://") || strings.HasPrefix(nextTok, "https://") || strings.HasPrefix(nextTok, "magnet:") {
+				if isLeechFlag(nextTok) || ext.IsURL(nextTok) || ext.IsMagnet(nextTok) || ext.IsMegaLink(nextTok) || strings.HasPrefix(nextTok, "tg://") {
 					break
 				}
 				nameParts = append(nameParts, nextTok)
@@ -1349,7 +1347,7 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 					opt.Password = tokens[i+1]
 					i++
 				}
-			} else if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
+			} else if ext.IsURL(tok) || ext.IsMagnet(tok) || ext.IsMegaLink(tok) || strings.HasPrefix(tok, "tg://") {
 				link = tok
 			}
 		}

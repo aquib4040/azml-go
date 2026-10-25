@@ -856,7 +856,7 @@ func (b *BotApp) sendStartupNotification(ctx context.Context) {
 		}
 	}
 
-	// 2. Otherwise send Bot Started Successfully notification to OWNER_ID and LEECH_LOG_ID
+	// 2. Otherwise send Bot Started Successfully notification to Authorized Chats (GC) or Owner
 	startMsg := fmt.Sprintf("⌬ <b><i>Bot Started Successfully!</i></b>\n"+
 		"┠ <b>Date:</b> %s\n"+
 		"┠ <b>Time:</b> %s\n"+
@@ -903,9 +903,18 @@ func (b *BotApp) sendStartupNotification(ctx context.Context) {
 		}
 	}
 
-	log.Printf("[AZML-Go Bot Client] Triggering startup notification (LeechLog: %d)...", cfg.LeechLogID)
-	if cfg.LeechLogID != 0 {
-		sendViaBotAPI(cfg.LeechLogID)
+	log.Printf("[AZML-Go Bot Client] Triggering startup notification...")
+	sentToAny := false
+	for _, chatID := range cfg.AuthorizedChats {
+		if chatID != 0 {
+			log.Printf("[AZML-Go Bot Client] Sending startup notification to Authorized Group/Chat: %d", chatID)
+			sendViaBotAPI(chatID)
+			sentToAny = true
+		}
+	}
+	if !sentToAny && cfg.OwnerID != 0 {
+		log.Printf("[AZML-Go Bot Client] No authorized chats configured; sending startup notification to Owner: %d", cfg.OwnerID)
+		sendViaBotAPI(cfg.OwnerID)
 	}
 }
 
