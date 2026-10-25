@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -83,6 +84,8 @@ type Config struct {
 	DailyLeechLimit           int64 // GB
 	DailyTaskLimit            int   // count
 	StorageThreshold          int64 // GB
+	WorkerBotTokens           []string
+	DumpChatID                int64
 }
 
 var (
@@ -192,6 +195,36 @@ func LoadConfig(path string) (*Config, error) {
 		DailyLeechLimit:           getEnvInt64("DAILY_LEECH_LIMIT", 0),
 		DailyTaskLimit:            getEnvInt("DAILY_TASK_LIMIT", 0),
 		StorageThreshold:          getEnvInt64("STORAGE_THRESHOLD", 1), // Default 1GB safety cushion
+		DumpChatID:                getEnvInt64("DUMP_CHAT_ID", getEnvInt64("BIN_CHANNEL", getEnvInt64("STORAGE_CHANNEL", getEnvInt64("LEECH_LOG_ID", 0)))),
+	}
+
+	// Collect multi-bot worker tokens (excluding the main BotToken)
+	mainToken := GlobalConfig.BotToken
+	seenTokens := make(map[string]bool)
+	var workerTokens []string
+
+	rawMulti := getEnv("BOT_TOKENS", getEnv("MULTI_TOKENS", ""))
+	if rawMulti != "" {
+		for _, part := range strings.Split(rawMulti, ",") {
+			t := strings.Trim(strings.TrimSpace(part), `"'`)
+			if t != "" && t != mainToken && !seenTokens[t] {
+				workerTokens = append(workerTokens, t)
+				seenTokens[t] = true
+			}
+		}
+	}
+	for i := 1; i <= 100; i++ {
+		key := fmt.Sprintf("MULTI_TOKEN%d", i)
+		if val := strings.Trim(strings.TrimSpace(os.Getenv(key)), `"'`); val != "" {
+			if !seenTokens[val] && val != mainToken {
+				workerTokens = append(workerTokens, val)
+				seenTokens[val] = true
+			}
+		}
+	}
+	GlobalConfig.WorkerBotTokens = workerTokens
+	if len(workerTokens) > 0 {
+		log.Printf("[Config] Loaded %d Multi-Bot Worker tokens for parallel chunk transfers (Dump: %d)", len(workerTokens), GlobalConfig.DumpChatID)
 	}
 
 	if err := os.MkdirAll(GlobalConfig.DownloadDir, 0777); err != nil {

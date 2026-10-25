@@ -45,6 +45,71 @@ func GetChannelAccessHash(channelID int64) int64 {
 	return channelAccessHashes[channelID]
 }
 
+// ResolveChannelAccessHash attempts to fetch and cache the AccessHash for a channel if not already cached.
+func ResolveChannelAccessHash(ctx context.Context, client *tg.Client, chatID int64) int64 {
+	raw := chatID
+	if raw < 0 {
+		rawStr := fmt.Sprintf("%d", raw)
+		if strings.HasPrefix(rawStr, "-100") {
+			if id, err := strconv.ParseInt(rawStr[4:], 10, 64); err == nil {
+				raw = id
+			}
+		} else if strings.HasPrefix(rawStr, "-") {
+			if id, err := strconv.ParseInt(rawStr[1:], 10, 64); err == nil {
+				raw = id
+			}
+		}
+	}
+	if hash := GetChannelAccessHash(raw); hash != 0 {
+		return hash
+	}
+	if client == nil {
+		return 0
+	}
+
+	// 1. Try MessagesGetChats first (does not require AccessHash)
+	if chats, err := client.MessagesGetChats(ctx, []int64{raw}); err == nil && chats != nil {
+		var chatList []tg.ChatClass
+		switch c := chats.(type) {
+		case *tg.MessagesChats:
+			chatList = c.Chats
+		case *tg.MessagesChatsSlice:
+			chatList = c.Chats
+		}
+		for _, chat := range chatList {
+			if ch, ok := chat.(*tg.Channel); ok && ch.ID == raw && ch.AccessHash != 0 {
+				CacheChannelAccessHash(raw, ch.AccessHash)
+				return ch.AccessHash
+			}
+		}
+	}
+
+	// 2. Try ChannelsGetChannels as fallback
+	chats, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{
+			ChannelID:  raw,
+			AccessHash: 0,
+		},
+	})
+	if err == nil && chats != nil {
+		var chatList []tg.ChatClass
+		switch c := chats.(type) {
+		case *tg.MessagesChats:
+			chatList = c.Chats
+		case *tg.MessagesChatsSlice:
+			chatList = c.Chats
+		}
+		for _, chat := range chatList {
+			if ch, ok := chat.(*tg.Channel); ok && ch.ID == raw && ch.AccessHash != 0 {
+				CacheChannelAccessHash(raw, ch.AccessHash)
+				return ch.AccessHash
+			}
+		}
+	}
+
+	return 0
+}
+
 func CacheUserAccessHash(userID, hash int64) {
 	if hash == 0 {
 		return

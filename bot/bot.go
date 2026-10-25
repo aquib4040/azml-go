@@ -17,6 +17,7 @@ import (
 	"azml-go/config"
 	"azml-go/helper/downloader"
 	"azml-go/helper/ext"
+	"azml-go/helper/pool"
 	"azml-go/helper/telegram"
 	"azml-go/helper/uploader"
 	"azml-go/types"
@@ -43,6 +44,7 @@ type BotApp struct {
 	sender      *telegram.MessageSender
 	uploader    *uploader.TelegramUploader
 	userMap     *types.SafeUserMap
+	sessPool    *pool.SessionPool
 	startTime   time.Time
 	botUsername string
 
@@ -288,6 +290,8 @@ func (b *BotApp) GetSender() *telegram.MessageSender      { return b.sender }
 func (b *BotApp) GetUploader() *uploader.TelegramUploader { return b.uploader }
 func (b *BotApp) GetUserMap() *types.SafeUserMap          { return b.userMap }
 func (b *BotApp) GetStartTime() time.Time                 { return b.startTime }
+func (b *BotApp) SetSessionPool(p *pool.SessionPool)      { b.sessPool = p }
+func (b *BotApp) GetSessionPool() *pool.SessionPool       { return b.sessPool }
 
 func (b *BotApp) registerDispatcher() {
 	b.dispatcher.OnNewMessage(func(ctx context.Context, e tg.Entities, update *tg.UpdateNewMessage) error {

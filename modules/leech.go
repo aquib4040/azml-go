@@ -14,6 +14,7 @@ import (
 	"azml-go/config"
 	"azml-go/helper/downloader"
 	"azml-go/helper/ext"
+	"azml-go/helper/pool"
 	"azml-go/helper/telegram"
 	"azml-go/helper/uploader"
 	"azml-go/types"
@@ -31,9 +32,11 @@ type LeechModule struct {
 	userMap    *types.SafeUserMap
 	taskMgr    *ext.TaskManager
 	statusMod  *StatusModule
+	sessPool   *pool.SessionPool
+	dumpChatID int64
 }
 
-func NewLeechModule(rawAPI, userRawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule) *LeechModule {
+func NewLeechModule(rawAPI, userRawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule, sessPool *pool.SessionPool, dumpChatID int64) *LeechModule {
 	return &LeechModule{
 		rawAPI:     rawAPI,
 		userRawAPI: userRawAPI,
@@ -42,7 +45,14 @@ func NewLeechModule(rawAPI, userRawAPI *tg.Client, sender *telegram.MessageSende
 		userMap:    userMap,
 		taskMgr:    ext.GetTaskManager(),
 		statusMod:  statusMod,
+		sessPool:   sessPool,
+		dumpChatID: dumpChatID,
 	}
+}
+
+func (m *LeechModule) SetSessionPool(sessPool *pool.SessionPool, dumpChatID int64) {
+	m.sessPool = sessPool
+	m.dumpChatID = dumpChatID
 }
 
 func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool) {
@@ -470,42 +480,112 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					_ = os.MkdirAll(filepath.Dir(destPath), 0777)
 					uTask.SetName(fileName)
 					uTask.SetSize(doc.Size)
-					uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
+					var dlSuccess bool
 
-					downloadClient := m.rawAPI
-					if m.userRawAPI != nil {
-						downloadClient = m.userRawAPI
+					effectiveDumpChatID := m.dumpChatID
+					if effectiveDumpChatID == 0 && cfg != nil {
+						effectiveDumpChatID = cfg.DumpChatID
 					}
-					chunkDL := downloader.NewTelegramChunkDownloader(downloadClient)
-					loc := doc.AsInputDocumentFileLocation("")
-					if loc != nil {
-						refreshRef := func() ([]byte, error) {
-							if msg.IsReply && msg.ReplyToID > 0 {
-								rMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, msg.ReplyToID)
-								if err == nil && rMsg != nil {
-									if dMedia, ok := rMsg.Media.(*tg.MessageMediaDocument); ok {
-										if dDoc, ok := dMedia.Document.(*tg.Document); ok {
-											return dDoc.FileReference, nil
+					if effectiveDumpChatID == 0 && cfg != nil {
+						effectiveDumpChatID = cfg.LeechLogID
+					}
+
+					// Check if Multi-Bot Download is enabled and sessions are active
+					if m.sessPool != nil && m.sessPool.ActiveSessionCount() > 0 && effectiveDumpChatID != 0 {
+						targetMsgID := msg.ReplyToID
+						if targetMsgID == 0 {
+							targetMsgID = msg.MessageID
+						}
+
+						rawDumpID := pool.RawChannelID(effectiveDumpChatID)
+						dumpHash := telegram.ResolveChannelAccessHash(ctx, m.rawAPI, effectiveDumpChatID)
+						if dumpHash == 0 {
+							dumpHash = telegram.GetChannelAccessHash(rawDumpID)
+						}
+
+						if dumpHash != 0 {
+							dumpPeer := &tg.InputPeerChannel{
+								ChannelID:  rawDumpID,
+								AccessHash: dumpHash,
+							}
+							log.Printf("[LEECH Multi-Bot] Forwarding message %d to dump channel %d for multi-client download...", targetMsgID, effectiveDumpChatID)
+							fwdRes, fwdErr := m.rawAPI.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+								FromPeer:   peer,
+								ToPeer:     dumpPeer,
+								ID:         []int{targetMsgID},
+								RandomID:   []int64{time.Now().UnixNano()},
+								DropAuthor: true,
+							})
+
+							fwdMsgID := telegram.ExtractMessageID(fwdRes)
+							if fwdErr == nil && fwdMsgID > 0 {
+								uTask.SetStatus(types.StatusDownloading, "Multi-Bot MTProto")
+								multiDL := downloader.NewMultiBotDownloader(m.sessPool, cfg.WorkerBotTokens, cfg.TelegramAPI, cfg.TelegramHash)
+								dlErr = multiDL.DownloadToFile(ctx, effectiveDumpChatID, int64(fwdMsgID), doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
+									uTask.SetProgress(curr, total, speed, eta)
+								})
+
+								// Clean up forwarded message from dump channel
+								cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
+								_, _ = m.rawAPI.ChannelsDeleteMessages(cleanCtx, &tg.ChannelsDeleteMessagesRequest{
+									Channel: &tg.InputChannel{ChannelID: rawDumpID, AccessHash: dumpHash},
+									ID:      []int{fwdMsgID},
+								})
+								cleanCancel()
+
+								if dlErr == nil {
+									downloadedPath = destPath
+									uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+									dlSuccess = true
+									log.Printf("[LEECH Multi-Bot] Multi-bot download succeeded for %s (%s)", fileName, ext.GetReadableFileSize(doc.Size))
+								} else {
+									log.Printf("[LEECH Multi-Bot] Multi-bot download returned error: %v. Falling back to single-client downloader...", dlErr)
+								}
+							} else {
+								log.Printf("[LEECH Multi-Bot] Failed to forward to dump channel (%v, msgID: %d). Falling back to single-client downloader...", fwdErr, fwdMsgID)
+							}
+						}
+					}
+
+					// Fallback to single-client chunk downloader if multi-bot was not active or failed
+					if !dlSuccess {
+						uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
+						downloadClient := m.rawAPI
+						if m.userRawAPI != nil {
+							downloadClient = m.userRawAPI
+						}
+						chunkDL := downloader.NewTelegramChunkDownloader(downloadClient)
+						loc := doc.AsInputDocumentFileLocation("")
+						if loc != nil {
+							refreshRef := func() ([]byte, error) {
+								if msg.IsReply && msg.ReplyToID > 0 {
+									rMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, msg.ReplyToID)
+									if err == nil && rMsg != nil {
+										if dMedia, ok := rMsg.Media.(*tg.MessageMediaDocument); ok {
+											if dDoc, ok := dMedia.Document.(*tg.Document); ok {
+												return dDoc.FileReference, nil
+											}
 										}
 									}
 								}
+								return nil, fmt.Errorf("failed to refresh file reference")
 							}
-							return nil, fmt.Errorf("failed to refresh file reference")
-						}
 
-						err := chunkDL.DownloadToFile(ctx, loc, doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
-							uTask.SetProgress(curr, total, speed, eta)
-						}, refreshRef)
+							err := chunkDL.DownloadToFile(ctx, loc, doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
+								uTask.SetProgress(curr, total, speed, eta)
+							}, refreshRef)
 
-						if err == nil {
-							downloadedPath = destPath
-							uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+							if err == nil {
+								downloadedPath = destPath
+								uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+								dlErr = nil
+							} else {
+								log.Printf("[LEECH] MTProto document download error: %v", err)
+								dlErr = err
+							}
 						} else {
-							log.Printf("[LEECH] MTProto document download error: %v", err)
-							dlErr = err
+							dlErr = fmt.Errorf("failed to get Telegram document file location")
 						}
-					} else {
-						dlErr = fmt.Errorf("failed to get Telegram document file location")
 					}
 				} else {
 					dlErr = fmt.Errorf("replied document is empty or unavailable")

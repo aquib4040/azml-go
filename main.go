@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"azml-go/config"
 	"azml-go/helper/downloader"
 	"azml-go/helper/ext"
+	"azml-go/helper/pool"
 	"azml-go/helper/telegram"
 	"azml-go/modules"
 	"azml-go/web"
@@ -59,7 +61,8 @@ func main() {
 	log.Println("Starting AZML-Go [Dynamic Auto Memory Engine]...")
 
 	// Load configuration
-	if _, err := config.LoadConfig("config.env"); err != nil {
+	cfg, err := config.LoadConfig("config.env")
+	if err != nil {
 		log.Printf("Warning: error loading config: %v", err)
 	}
 
@@ -84,6 +87,19 @@ func main() {
 	// Create Bot Application with gotd MTProto client
 	app := bot.NewBotApp()
 
+	// Initialize Multi-Bot SessionPool if worker bot tokens are configured
+	var sessPool *pool.SessionPool
+	if len(cfg.WorkerBotTokens) > 0 {
+		sessionsDir := filepath.Join(cfg.DownloadDir, "gotd_sessions")
+		_ = os.MkdirAll(sessionsDir, 0777)
+		sessPool = pool.NewSessionPool(sessionsDir)
+		log.Printf("[Multi-Bot Pool] Initialized SessionPool with %d worker bot tokens. Warming up...", len(cfg.WorkerBotTokens))
+		sessPool.WarmupTokens(cfg.TelegramAPI, cfg.TelegramHash, cfg.WorkerBotTokens)
+		app.SetSessionPool(sessPool)
+	} else {
+		log.Println("[Multi-Bot Pool] No BOT_TOKENS / MULTI_TOKENS configured (Single Bot Mode active)")
+	}
+
 	// Instantiate and wire modules
 	sender := app.GetSender()
 	uploader := app.GetUploader()
@@ -91,8 +107,12 @@ func main() {
 	startTime := app.GetStartTime()
 	ext.SetBotStartTime(startTime)
 
+	if sessPool != nil {
+		uploader.SetSessionPool(sessPool, cfg.DumpChatID)
+	}
+
 	statusMod := modules.NewStatusModule(sender)
-	leechMod := modules.NewLeechModule(app.GetRawAPI(), app.GetUserRawAPI(), sender, uploader, userMap, statusMod)
+	leechMod := modules.NewLeechModule(app.GetRawAPI(), app.GetUserRawAPI(), sender, uploader, userMap, statusMod, sessPool, cfg.DumpChatID)
 	ytdlMod := modules.NewYtdlModule(sender, uploader, userMap, statusMod)
 	cancelMod := modules.NewCancelModule(sender, userMap, statusMod)
 	settingsMod := modules.NewSettingsModule(app.GetRawAPI(), sender, userMap)
@@ -150,6 +170,13 @@ func main() {
 	// Context with graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	defer func() {
+		if sessPool != nil {
+			log.Println("[Multi-Bot Pool] Stopping all worker bot sessions...")
+			sessPool.StopAll()
+		}
+	}()
 
 	if err := app.Start(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("Fatal error running AZML-Go: %v", err)

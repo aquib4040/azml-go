@@ -21,6 +21,7 @@ import (
 
 	"azml-go/config"
 	"azml-go/helper/ext"
+	"azml-go/helper/pool"
 	"azml-go/helper/telegram"
 	"azml-go/types"
 
@@ -71,6 +72,8 @@ type TelegramUploader struct {
 	botUp      *uploader.Uploader
 	userClient *tg.Client
 	userUp     *uploader.Uploader
+	sessPool   *pool.SessionPool
+	dumpChatID int64
 }
 
 func NewTelegramUploader(botClient *tg.Client, userClient *tg.Client) *TelegramUploader {
@@ -85,6 +88,11 @@ func NewTelegramUploader(botClient *tg.Client, userClient *tg.Client) *TelegramU
 		userClient: userClient,
 		userUp:     userUp,
 	}
+}
+
+func (u *TelegramUploader) SetSessionPool(sessPool *pool.SessionPool, dumpChatID int64) {
+	u.sessPool = sessPool
+	u.dumpChatID = dumpChatID
 }
 
 type UploadProgressFunc func(curr, total int64, speed float64, eta string)
@@ -233,6 +241,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	const twoGB = int64(2097152000)
 	var clientToUse *tg.Client
+	var workerSession *pool.BotSession
 
 	if fileSize > twoGB {
 		if u.userClient == nil || u.userUp == nil {
@@ -240,7 +249,19 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 		clientToUse = u.userClient
 	} else {
-		clientToUse = u.botClient
+		// Multi-bot upload load balancing:
+		// When SessionPool has active sessions, use a worker session to avoid rate-limiting the main bot.
+		if u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 {
+			cfg := config.Get()
+			if wBot, err := u.sessPool.GetNextAvailable(cfg.WorkerBotTokens, cfg.TelegramAPI, cfg.TelegramHash); err == nil && wBot != nil {
+				workerSession = wBot
+				clientToUse = wBot.API
+				log.Printf("[AZML-Go Uploader] Multi-bot worker session ...%s selected for upload", wBot.SafeSuffix())
+			}
+		}
+		if clientToUse == nil {
+			clientToUse = u.botClient
+		}
 	}
 
 	uploadStart := time.Now()
@@ -473,7 +494,32 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	uploadPeer := peer
 	actualDestChatID := fromChatID
 
-	if isGroupChat {
+	effectiveDumpChatID := opt.DumpChatID
+	if effectiveDumpChatID == 0 {
+		effectiveDumpChatID = u.dumpChatID
+	}
+	cfg := config.Get()
+	if effectiveDumpChatID == 0 && cfg != nil {
+		effectiveDumpChatID = cfg.DumpChatID
+	}
+	if effectiveDumpChatID == 0 && cfg != nil {
+		effectiveDumpChatID = cfg.LeechLogID
+	}
+
+	if workerSession != nil && effectiveDumpChatID != 0 {
+		if inChan, err := workerSession.ResolveChannel(ctx, effectiveDumpChatID); err == nil && inChan != nil {
+			uploadPeer = &tg.InputPeerChannel{
+				ChannelID:  inChan.ChannelID,
+				AccessHash: inChan.AccessHash,
+			}
+			actualDestChatID = effectiveDumpChatID
+			log.Printf("[AZML-Go Uploader] Multi-bot worker uploading to dump channel %d (dest chat %d)", effectiveDumpChatID, fromChatID)
+		} else {
+			log.Printf("[AZML-Go Uploader] Worker could not resolve dump channel %d: %v. Falling back to main bot.", effectiveDumpChatID, err)
+			clientToUse = u.botClient
+			workerSession = nil
+		}
+	} else if isGroupChat {
 		// Prefer uploading directly to LeechLogID if its access hash is known
 		if opt.LogChatID != 0 {
 			chID := getChannelID(opt.LogChatID)
@@ -541,7 +587,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	msgID := telegram.ExtractMessageID(res)
 	if msgID > 0 {
-		cfg := config.Get()
 		botToken := ""
 		if cfg != nil {
 			botToken = cfg.BotToken
@@ -552,6 +597,23 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 		sentChats := make(map[int64]bool)
 		sentChats[actualDestChatID] = true
+
+		// 0. Ensure message is delivered to original chat (group/channel/PM) where leech command was sent
+		if !sentChats[fromChatID] {
+			sentChats[fromChatID] = true
+			if !copyMessageViaBotAPI(botToken, fromChatID, actualDestChatID, msgID) {
+				_, fErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+					FromPeer:   uploadPeer,
+					ToPeer:     peer,
+					ID:         []int{msgID},
+					RandomID:   []int64{time.Now().UnixNano() + 1},
+					DropAuthor: true,
+				})
+				if fErr != nil {
+					log.Printf("[AZML-Go Uploader] Delivery to original chat (%d) failed: %v", fromChatID, fErr)
+				}
+			}
+		}
 
 		// 1. Send to Leech Log ID (if configured and not already sent there)
 		if opt.LogChatID != 0 && !sentChats[opt.LogChatID] {
