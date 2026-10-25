@@ -195,28 +195,46 @@ func LoadConfig(path string) (*Config, error) {
 		DailyLeechLimit:           getEnvInt64("DAILY_LEECH_LIMIT", 0),
 		DailyTaskLimit:            getEnvInt("DAILY_TASK_LIMIT", 0),
 		StorageThreshold:          getEnvInt64("STORAGE_THRESHOLD", 1), // Default 1GB safety cushion
-		DumpChatID:                getEnvInt64("DUMP_CHAT_ID", getEnvInt64("BIN_CHANNEL", getEnvInt64("STORAGE_CHANNEL", getEnvInt64("LEECH_LOG_ID", 0)))),
+		DumpChatID:                getEnvInt64("DUMP_CHAT_ID", getEnvInt64("BIN_CHANNEL", getEnvInt64("STORAGE_CHANNEL", getEnvInt64("STORAGE_CHANNELS", getEnvInt64("LEECH_LOG_ID", 0))))),
 	}
 
-	// Collect multi-bot worker tokens (excluding the main BotToken)
-	mainToken := GlobalConfig.BotToken
+	// Resolve main bot token
+	mainToken := strings.Trim(strings.TrimSpace(getEnv("BOT_TOKEN", getEnv("MAIN_BOT_TOKEN", ""))), `"'`)
+	if mainToken == "" {
+		for _, candidate := range parseTokenString(getEnv("BOT_TOKENS", getEnv("MULTI_TOKENS", getEnv("MULTI_TOKEN", "")))) {
+			if candidate != "" {
+				mainToken = candidate
+				break
+			}
+		}
+	}
+	GlobalConfig.BotToken = mainToken
+
+	// Collect multi-bot worker tokens (strictly excluding the main BotToken)
 	seenTokens := make(map[string]bool)
 	var workerTokens []string
 
-	rawMulti := getEnv("BOT_TOKENS", getEnv("MULTI_TOKENS", ""))
-	if rawMulti != "" {
-		for _, part := range strings.Split(rawMulti, ",") {
-			t := strings.Trim(strings.TrimSpace(part), `"'`)
+	tokenSources := []string{
+		getEnv("BOT_TOKENS", ""),
+		getEnv("MULTI_TOKENS", ""),
+		getEnv("MULTI_TOKEN", ""),
+		getEnv("TOKENS", ""),
+		getEnv("WORKER_TOKENS", ""),
+	}
+
+	for _, src := range tokenSources {
+		for _, t := range parseTokenString(src) {
 			if t != "" && t != mainToken && !seenTokens[t] {
 				workerTokens = append(workerTokens, t)
 				seenTokens[t] = true
 			}
 		}
 	}
+
 	for i := 1; i <= 100; i++ {
 		key := fmt.Sprintf("MULTI_TOKEN%d", i)
 		if val := strings.Trim(strings.TrimSpace(os.Getenv(key)), `"'`); val != "" {
-			if !seenTokens[val] && val != mainToken {
+			if val != mainToken && !seenTokens[val] {
 				workerTokens = append(workerTokens, val)
 				seenTokens[val] = true
 			}
@@ -224,7 +242,7 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	GlobalConfig.WorkerBotTokens = workerTokens
 	if len(workerTokens) > 0 {
-		log.Printf("[Config] Loaded %d Multi-Bot Worker tokens for parallel chunk transfers (Dump: %d)", len(workerTokens), GlobalConfig.DumpChatID)
+		log.Printf("[Config] Loaded %d Multi-Bot Worker tokens for parallel transfers (Main Bot excluded, Dump: %d)", len(workerTokens), GlobalConfig.DumpChatID)
 	}
 
 	if err := os.MkdirAll(GlobalConfig.DownloadDir, 0777); err != nil {
@@ -264,12 +282,33 @@ func getEnvInt(key string, defaultVal int) int {
 	return n
 }
 
+func parseTokenString(raw string) []string {
+	var tokens []string
+	raw = strings.ReplaceAll(raw, ";", ",")
+	raw = strings.ReplaceAll(raw, "\n", ",")
+	raw = strings.ReplaceAll(raw, "\r", ",")
+	raw = strings.ReplaceAll(raw, "\t", ",")
+	for _, part := range strings.Split(raw, ",") {
+		for _, token := range strings.Fields(part) {
+			token = strings.Trim(strings.TrimSpace(token), `"'`)
+			if token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens
+}
+
 func getEnvInt64(key string, defaultVal int64) int64 {
 	val := os.Getenv(key)
 	if val == "" {
 		return defaultVal
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+	val = strings.Trim(strings.TrimSpace(val), `"'`)
+	if strings.Contains(val, ",") {
+		val = strings.TrimSpace(strings.Split(val, ",")[0])
+	}
+	n, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
 		return defaultVal
 	}

@@ -51,6 +51,8 @@ type CachedDocument struct {
 type BotSession struct {
 	Index           int
 	Token           string
+	BotID           int64
+	Username        string
 	client          *telegram.Client
 	API             *tg.Client
 	ctx             context.Context
@@ -148,7 +150,14 @@ type SessionPool struct {
 	tokenMap      map[string]*BotSession
 	invalidTokens sync.Map // token (string) -> true
 	baseDataPath  string
+	dumpChatID    int64
 	rrIndex       int
+}
+
+func (p *SessionPool) SetDumpChatID(id int64) {
+	p.mu.Lock()
+	p.dumpChatID = id
+	p.mu.Unlock()
 }
 
 func NewSessionPool(baseDataPath string) *SessionPool {
@@ -304,7 +313,34 @@ func (p *SessionPool) InitSession(apiID int, apiHash string, token string) (*Bot
 				}
 
 				bot.API = client.API()
-				log.Printf("[SessionPool] Session authenticated: token ...%s", safeSuffix)
+
+				botUsername := ""
+				if self, err := client.Self(runCtx); err == nil && self != nil {
+					bot.BotID = self.ID
+					bot.Username = self.Username
+					if self.Username != "" {
+						botUsername = "@" + self.Username
+					} else {
+						botUsername = self.FirstName
+					}
+					log.Printf("[SessionPool] Worker bot authenticated: %s (ID: %d, token ...%s)", botUsername, self.ID, safeSuffix)
+				} else {
+					log.Printf("[SessionPool] Worker bot authenticated: token ...%s", safeSuffix)
+				}
+
+				p.mu.RLock()
+				dumpID := p.dumpChatID
+				p.mu.RUnlock()
+
+				if dumpID != 0 {
+					checkCtx, checkCancel := context.WithTimeout(runCtx, 10*time.Second)
+					if inChan, err := bot.ResolveChannel(checkCtx, dumpID); err == nil && inChan != nil {
+						log.Printf("[SessionPool] ✓ %s verified ADMIN access to Dump Channel (%d)", botUsername, dumpID)
+					} else {
+						log.Printf("[SessionPool] ⚠️ Warning: %s cannot access Dump Channel %d (%v). Ensure bot is added as ADMIN in channel!", botUsername, dumpID, err)
+					}
+					checkCancel()
+				}
 
 				select {
 				case <-bot.ready:
@@ -771,9 +807,12 @@ func (p *SessionPool) GetNextAvailable(tokens []string, apiID int, apiHash strin
 }
 
 // WarmupTokens starts background authentication of multi-worker tokens with controlled concurrency
-func (p *SessionPool) WarmupTokens(apiID int, apiHash string, tokens []string) {
+func (p *SessionPool) WarmupTokens(apiID int, apiHash string, tokens []string, dumpChatID ...int64) {
 	if len(tokens) == 0 {
 		return
+	}
+	if len(dumpChatID) > 0 && dumpChatID[0] != 0 {
+		p.SetDumpChatID(dumpChatID[0])
 	}
 	log.Printf("[Pool] Starting background warmup for %d worker bot tokens...", len(tokens))
 

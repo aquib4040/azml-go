@@ -46,8 +46,8 @@ func setupEnvironment() {
 func main() {
 	setupEnvironment()
 
-	// Automatic dynamic memory management - unrestricted memory ceiling
-	debug.SetMemoryLimit(-1) // No artificial limit, let Go expand dynamically as needed
+	// Proactive container memory ceiling - 400MB soft target for Heroku 512MB dynos
+	debug.SetMemoryLimit(400 * 1024 * 1024)
 
 	// Immediately reclaim and release freed memory back to the OS
 	go func() {
@@ -94,7 +94,7 @@ func main() {
 		_ = os.MkdirAll(sessionsDir, 0777)
 		sessPool = pool.NewSessionPool(sessionsDir)
 		log.Printf("[Multi-Bot Pool] Initialized SessionPool with %d worker bot tokens. Warming up...", len(cfg.WorkerBotTokens))
-		sessPool.WarmupTokens(cfg.TelegramAPI, cfg.TelegramHash, cfg.WorkerBotTokens)
+		sessPool.WarmupTokens(cfg.TelegramAPI, cfg.TelegramHash, cfg.WorkerBotTokens, cfg.DumpChatID)
 		app.SetSessionPool(sessPool)
 	} else {
 		log.Println("[Multi-Bot Pool] No BOT_TOKENS / MULTI_TOKENS configured (Single Bot Mode active)")

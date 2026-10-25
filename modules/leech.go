@@ -509,15 +509,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 								AccessHash: dumpHash,
 							}
 							log.Printf("[LEECH Multi-Bot] Forwarding message %d to dump channel %d for multi-client download...", targetMsgID, effectiveDumpChatID)
-							fwdRes, fwdErr := m.rawAPI.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-								FromPeer:   peer,
-								ToPeer:     dumpPeer,
-								ID:         []int{targetMsgID},
-								RandomID:   []int64{time.Now().UnixNano()},
-								DropAuthor: true,
-							})
+							fwdMsgID, fwdErr := telegram.ForwardToChannelWithFloodWait(ctx, m.rawAPI, peer, dumpPeer, targetMsgID)
 
-							fwdMsgID := telegram.ExtractMessageID(fwdRes)
 							if fwdErr == nil && fwdMsgID > 0 {
 								uTask.SetStatus(types.StatusDownloading, "Multi-Bot MTProto")
 								multiDL := downloader.NewMultiBotDownloader(m.sessPool, cfg.WorkerBotTokens, cfg.TelegramAPI, cfg.TelegramHash)
@@ -525,13 +518,15 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 									uTask.SetProgress(curr, total, speed, eta)
 								})
 
-								// Clean up forwarded message from dump channel
-								cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
-								_, _ = m.rawAPI.ChannelsDeleteMessages(cleanCtx, &tg.ChannelsDeleteMessagesRequest{
-									Channel: &tg.InputChannel{ChannelID: rawDumpID, AccessHash: dumpHash},
-									ID:      []int{fwdMsgID},
-								})
-								cleanCancel()
+								// Clean up forwarded message from dump channel asynchronously so it never delays task completion
+								go func(msgID int) {
+									cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 15*time.Second)
+									defer cleanCancel()
+									_, _ = m.rawAPI.ChannelsDeleteMessages(cleanCtx, &tg.ChannelsDeleteMessagesRequest{
+										Channel: &tg.InputChannel{ChannelID: rawDumpID, AccessHash: dumpHash},
+										ID:      []int{msgID},
+									})
+								}(fwdMsgID)
 
 								if dlErr == nil {
 									downloadedPath = destPath

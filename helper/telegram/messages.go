@@ -28,6 +28,9 @@ var (
 	accessHashMu        sync.RWMutex
 	channelAccessHashes = make(map[int64]int64)
 	userAccessHashes    = make(map[int64]int64)
+
+	dumpForwardMu   sync.Mutex
+	lastDumpForward time.Time
 )
 
 func CacheChannelAccessHash(channelID, hash int64) {
@@ -108,6 +111,58 @@ func ResolveChannelAccessHash(ctx context.Context, client *tg.Client, chatID int
 	}
 
 	return 0
+}
+
+// ForwardToChannelWithFloodWait safely forwards a message to a channel with rate limiting
+// (minimum 1500ms between forwards) and automatic retry on Telegram FLOOD_WAIT errors.
+// This prevents Telegram from flagging the bot session when multiple files are forwarded concurrently.
+func ForwardToChannelWithFloodWait(ctx context.Context, client *tg.Client, fromPeer tg.InputPeerClass, toPeer tg.InputPeerClass, msgID int) (int, error) {
+	dumpForwardMu.Lock()
+	defer dumpForwardMu.Unlock()
+
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		since := time.Since(lastDumpForward)
+		if since < 1500*time.Millisecond {
+			delay := 1500*time.Millisecond - since
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		lastDumpForward = time.Now()
+
+		fwdRes, err := client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+			FromPeer:   fromPeer,
+			ToPeer:     toPeer,
+			ID:         []int{msgID},
+			RandomID:   []int64{time.Now().UnixNano()},
+			DropAuthor: true,
+		})
+
+		if err != nil {
+			if flood, ok := tgerr.AsFloodWait(err); ok {
+				waitTime := flood + 1*time.Second
+				log.Printf("[Dump Forward] FLOOD_WAIT: sleeping %v before retry (attempt %d/%d)", waitTime, attempt+1, maxRetries)
+				select {
+				case <-time.After(waitTime):
+					continue
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}
+			return 0, fmt.Errorf("failed to forward message to channel: %w", err)
+		}
+
+		fwdMsgID := ExtractMessageID(fwdRes)
+		if fwdMsgID > 0 {
+			return fwdMsgID, nil
+		}
+		return 0, fmt.Errorf("failed to extract forwarded message ID from response")
+	}
+
+	return 0, fmt.Errorf("exceeded max retries forwarding message to channel")
 }
 
 func CacheUserAccessHash(userID, hash int64) {

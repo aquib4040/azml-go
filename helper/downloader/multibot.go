@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,46 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
+
+var globalActiveDownloads atomic.Int64
+
+func computeTargetWorkers(activeDownloads int64, totalBots int, numTasks int) int {
+	if totalBots <= 0 {
+		totalBots = 1
+	}
+
+	var target int
+	if activeDownloads <= 1 {
+		// Single file download: 4 to 6 parallel workers across the bots
+		target = 6
+		if target > totalBots {
+			target = totalBots
+		}
+	} else if activeDownloads <= 3 {
+		// 2-3 concurrent downloads: 2-3 workers per file
+		target = 3
+	} else {
+		// 4+ concurrent downloads (e.g. 5 to 10 files):
+		// 1-2 workers per file ensures total workers across all files <= 12-16!
+		// Prevents Heroku R14 memory spikes and Telegram IP connection rate limits!
+		target = 2
+	}
+
+	// Environment variable manual override
+	if envVal := os.Getenv("DOWNLOAD_THREADS"); envVal != "" {
+		if val, err := strconv.Atoi(envVal); err == nil && val > 0 {
+			target = val
+		}
+	}
+
+	if target > numTasks {
+		target = numTasks
+	}
+	if target < 1 {
+		target = 1
+	}
+	return target
+}
 
 // MultiBotDownloader downloads files from a dump channel using a pool of authenticated MTProto worker bots.
 // Each chunk is load-balanced across worker sessions with per-session anti-flood pacing and seamless failover.
@@ -91,22 +132,11 @@ func (m *MultiBotDownloader) DownloadToFile(
 		activeBots = 1
 	}
 
-	// Compute concurrency based on active bots in pool
-	numWorkers := activeBots * 2
-	if numWorkers < 4 {
-		numWorkers = 4
-	}
-	if numWorkers > 16 {
-		numWorkers = 16
-	}
-	if envVal := os.Getenv("DOWNLOAD_THREADS"); envVal != "" {
-		if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
-			numWorkers = val
-		}
-	}
-	if totalParts < numWorkers {
-		numWorkers = totalParts
-	}
+	activeDownloads := globalActiveDownloads.Add(1)
+	defer globalActiveDownloads.Add(-1)
+
+	numWorkers := computeTargetWorkers(activeDownloads, activeBots, totalParts)
+	bufferLimit := numWorkers * 2
 
 	partActualSize := make([]int64, totalParts)
 	for i := 0; i < totalParts; i++ {
@@ -119,11 +149,22 @@ func (m *MultiBotDownloader) DownloadToFile(
 		}
 	}
 
-	tasks := make(chan int, totalParts)
-	for i := 0; i < totalParts; i++ {
-		tasks <- i
-	}
-	close(tasks)
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+
+	tasks := make(chan int, bufferLimit)
+
+	// Feeder goroutine: feeds parts to workers bounded strictly by bufferLimit
+	go func() {
+		defer close(tasks)
+		for i := 0; i < totalParts; i++ {
+			select {
+			case <-workerCtx.Done():
+				return
+			case tasks <- i:
+			}
+		}
+	}()
 
 	var downloadedBytes atomic.Int64
 	var errOnce sync.Once
@@ -161,17 +202,22 @@ func (m *MultiBotDownloader) DownloadToFile(
 		}
 	}
 
-	log.Printf("[MultiBot DL] 🚀 Starting download: %s (%s), %d parts, %d workers across %d MTProto bots",
-		filepath.Base(destPath), ext.GetReadableFileSize(fileSize), totalParts, numWorkers, activeBots)
+	log.Printf("[MultiBot DL] 🚀 Starting download: %s (%s), %d parts, %d workers (Active DLs: %d, MTProto Bots: %d)",
+		filepath.Base(destPath), ext.GetReadableFileSize(fileSize), totalParts, numWorkers, activeDownloads, activeBots)
 
 	var wg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[MultiBot DL] Worker %d panic recovered: %v\n%s", workerID, r, debug.Stack())
+				}
+			}()
 
 			for partIndex := range tasks {
-				if firstErr != nil || ctx.Err() != nil {
+				if firstErr != nil || workerCtx.Err() != nil {
 					return
 				}
 
@@ -179,10 +225,11 @@ func (m *MultiBotDownloader) DownloadToFile(
 				actualBytes := partActualSize[partIndex]
 				requestLimit := int(partSize)
 
-				data, partErr := m.fetchChunkWithRetry(ctx, dumpChatID, dumpMsgID, offset, requestLimit, partIndex, totalParts)
+				data, partErr := m.fetchChunkWithRetry(workerCtx, dumpChatID, dumpMsgID, offset, requestLimit, partIndex, totalParts)
 				if partErr != nil {
 					errOnce.Do(func() {
 						firstErr = fmt.Errorf("download failed at part %d/%d (offset %d): %w", partIndex+1, totalParts, offset, partErr)
+						workerCancel()
 					})
 					return
 				}
@@ -194,6 +241,7 @@ func (m *MultiBotDownloader) DownloadToFile(
 				if _, wErr := out.WriteAt(data, offset); wErr != nil {
 					errOnce.Do(func() {
 						firstErr = fmt.Errorf("failed to write part %d to disk: %w", partIndex+1, wErr)
+						workerCancel()
 					})
 					return
 				}
@@ -273,8 +321,8 @@ func (m *MultiBotDownloader) fetchChunkWithRetry(
 			log.Printf("[MultiBot DL] ⚡ Bot ...%s hit FloodWait on part %d/%d. Failover to next bot...",
 				currentBot.SafeSuffix(), partIndex+1, totalParts)
 		} else if err != nil && (strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline")) {
-			currentBot.SetCooldown(10)
-			log.Printf("[MultiBot DL] ⏱️ Bot ...%s part %d/%d timed out. Failover to next bot...",
+			currentBot.SetCooldown(8)
+			log.Printf("[MultiBot DL] ⏱️ Bot ...%s part %d/%d timed out (8s cooldown). Failover to next bot...",
 				currentBot.SafeSuffix(), partIndex+1, totalParts)
 		} else if err != nil && (strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") || strings.Contains(err.Error(), "FILE_REFERENCE_INVALID")) {
 			log.Printf("[MultiBot DL] 🔄 Renewing file reference for dump msg %d on bot ...%s", dumpMsgID, currentBot.SafeSuffix())
@@ -324,6 +372,40 @@ func (m *MultiBotDownloader) fetchChunkWithBot(
 		Offset:       offset,
 		Limit:        limit,
 	})
+
+	// Inline FloodWait retry for minor <= 2s wait (avoids hopping sessions unnecessarily)
+	if err != nil {
+		if d, ok := tgerr.AsFloodWait(err); ok {
+			waitSec := int(d.Seconds())
+			if waitSec <= 2 {
+				time.Sleep(d + 80*time.Millisecond)
+				res, err = bot.API.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+					Precise:      false,
+					CDNSupported: false,
+					Location:     location,
+					Offset:       offset,
+					Limit:        limit,
+				})
+			}
+		}
+	}
+
+	// Immediate file reference refresh on expiration
+	if err != nil && (strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") || strings.Contains(err.Error(), "FILE_REFERENCE_INVALID")) {
+		log.Printf("[MultiBot DL] 🔄 Renewing file reference for dump msg %d on bot ...%s", dumpMsgID, bot.SafeSuffix())
+		_, _, newLoc, rErr := bot.ResolveDocument(ctx, dumpChatID, dumpMsgID, true)
+		if rErr == nil && newLoc != nil {
+			location = newLoc
+			res, err = bot.API.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+				Precise:      false,
+				CDNSupported: false,
+				Location:     location,
+				Offset:       offset,
+				Limit:        limit,
+			})
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
