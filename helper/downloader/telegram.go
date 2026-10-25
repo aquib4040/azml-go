@@ -24,12 +24,42 @@ import (
 type DownloadProgressFunc func(curr, total int64, speed float64, eta string)
 
 type TelegramChunkDownloader struct {
-	client *tg.Client
+	client           *tg.Client
+	globalFloodUntil atomic.Int64
 }
 
 func NewTelegramChunkDownloader(client *tg.Client) *TelegramChunkDownloader {
 	return &TelegramChunkDownloader{
 		client: client,
+	}
+}
+
+func (d *TelegramChunkDownloader) waitGlobalFlood(ctx context.Context) error {
+	untilNano := d.globalFloodUntil.Load()
+	if untilNano == 0 {
+		return nil
+	}
+	waitDur := time.Until(time.Unix(0, untilNano))
+	if waitDur > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(waitDur):
+		}
+	}
+	return nil
+}
+
+func (d *TelegramChunkDownloader) triggerGlobalFlood(dur time.Duration) {
+	target := time.Now().Add(dur).UnixNano()
+	for {
+		curr := d.globalFloodUntil.Load()
+		if curr >= target {
+			break
+		}
+		if d.globalFloodUntil.CompareAndSwap(curr, target) {
+			break
+		}
 	}
 }
 
@@ -66,7 +96,7 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 
 	_ = out.Truncate(fileSize)
 
-	numWorkers := 8
+	numWorkers := 4
 	if envVal := os.Getenv("DOWNLOAD_THREADS"); envVal != "" {
 		if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 			numWorkers = val
@@ -206,13 +236,19 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 	totalParts int,
 	refreshRef func() ([]byte, error),
 ) ([]byte, error) {
-	const maxAttempts = 15
+	const maxTransientRetries = 15
+	transientAttempts := 0
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
+		}
+
+		// Wait if any worker recently received a FloodWait
+		if err := d.waitGlobalFlood(ctx); err != nil {
+			return nil, err
 		}
 
 		partCtx, partCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -229,7 +265,16 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 			switch f := res.(type) {
 			case *tg.UploadFile:
 				if len(f.Bytes) == 0 {
-					return nil, fmt.Errorf("empty chunk received from Telegram (len=0)")
+					transientAttempts++
+					if transientAttempts > maxTransientRetries {
+						return nil, fmt.Errorf("received empty chunk after %d retries", maxTransientRetries)
+					}
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(500 * time.Millisecond):
+					}
+					continue
 				}
 				return f.Bytes, nil
 			default:
@@ -237,19 +282,22 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 			}
 		}
 
-		// 1. FloodWait — pause only this worker, don't kill the download
+		// 1. FloodWait — pause ALL workers globally, do NOT burn transient retry count
 		if waitDur, ok := tgerr.AsFloodWait(err); ok {
 			if waitDur < 1*time.Second {
 				waitDur = 1 * time.Second
 			}
-			jitter := time.Duration(rand.Intn(500)) * time.Millisecond
-			log.Printf("[TG Chunk DL] Part %d/%d FloodWait %v (attempt %d/%d)",
-				partIndex+1, totalParts, waitDur, attempt, maxAttempts)
+			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
+			totalWait := waitDur + jitter
+			log.Printf("[TG Chunk DL] Part %d/%d FloodWait %v. Pausing all workers for %v...",
+				partIndex+1, totalParts, waitDur, totalWait)
+
+			d.triggerGlobalFlood(totalWait)
 
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(waitDur + jitter):
+			case <-time.After(totalWait):
 			}
 			continue
 		}
@@ -270,13 +318,18 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 		}
 
 		// 3. Transient error — exponential backoff with jitter
-		backoff := time.Duration(attempt) * 500 * time.Millisecond
+		transientAttempts++
+		if transientAttempts > maxTransientRetries {
+			return nil, fmt.Errorf("part %d/%d failed after %d transient attempts: %w", partIndex+1, totalParts, maxTransientRetries, err)
+		}
+
+		backoff := time.Duration(transientAttempts) * 500 * time.Millisecond
 		if backoff > 5*time.Second {
 			backoff = 5 * time.Second
 		}
 		jitter := time.Duration(rand.Intn(400)) * time.Millisecond
-		log.Printf("[TG Chunk DL] Part %d/%d error: %v. Retrying in %v (attempt %d/%d)",
-			partIndex+1, totalParts, err, backoff+jitter, attempt, maxAttempts)
+		log.Printf("[TG Chunk DL] Part %d/%d error: %v. Retrying in %v (transient attempt %d/%d)",
+			partIndex+1, totalParts, err, backoff+jitter, transientAttempts, maxTransientRetries)
 
 		select {
 		case <-ctx.Done():
@@ -284,8 +337,6 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 		case <-time.After(backoff + jitter):
 		}
 	}
-
-	return nil, fmt.Errorf("failed after %d attempts", maxAttempts)
 }
 
 type TelegramDownloader struct {
