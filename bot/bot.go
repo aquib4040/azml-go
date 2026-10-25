@@ -488,8 +488,8 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				}
 			}
 
-			// 3. Populate replied message text and media with quick 2s timeout
-			fetchCtx, fetchCancel := context.WithTimeout(ctx, 2*time.Second)
+			// 3. Populate replied message text and media with quick 4s timeout
+			fetchCtx, fetchCancel := context.WithTimeout(ctx, 4*time.Second)
 			if repliedMsg, err := telegram.FetchMessage(fetchCtx, b.rawAPI, targetPeer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
 				msgCtx.ReplyText = repliedMsg.Message
 				if repliedMsg.Media != nil {

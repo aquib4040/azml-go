@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,7 +21,29 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+func setupEnvironment() {
+	currentPath := os.Getenv("PATH")
+	aptBinDirs := []string{"/app/.apt/usr/bin", "/app/.apt/bin", "/usr/local/bin", "/usr/bin", "/bin"}
+	for _, dir := range aptBinDirs {
+		if !strings.Contains(currentPath, dir) {
+			currentPath = dir + string(os.PathListSeparator) + currentPath
+		}
+	}
+	_ = os.Setenv("PATH", currentPath)
+
+	currentLD := os.Getenv("LD_LIBRARY_PATH")
+	aptLibDirs := []string{"/app/.apt/usr/lib", "/app/.apt/usr/lib/x86_64-linux-gnu", "/app/.apt/lib/x86_64-linux-gnu"}
+	for _, dir := range aptLibDirs {
+		if !strings.Contains(currentLD, dir) {
+			currentLD = dir + string(os.PathListSeparator) + currentLD
+		}
+	}
+	_ = os.Setenv("LD_LIBRARY_PATH", currentLD)
+}
+
 func main() {
+	setupEnvironment()
+
 	// Automatic dynamic memory management - unrestricted memory ceiling
 	debug.SetMemoryLimit(-1) // No artificial limit, let Go expand dynamically as needed
 

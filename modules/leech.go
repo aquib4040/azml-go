@@ -67,7 +67,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		opt.IsExtract = true
 	}
 
-	if link == "" && msg.IsReply && msg.ReplyText != "" {
+	if link == "" && msg.IsReply && msg.ReplyText != "" && !msg.HasMedia && msg.RawMedia == nil {
 		for _, w := range strings.Fields(msg.ReplyText) {
 			if strings.HasPrefix(w, "http") || strings.HasPrefix(w, "magnet:") {
 				link = w
@@ -83,7 +83,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 	if strings.Contains(msg.Text, "-b") || strings.Contains(msg.Text, "-bulk") {
 		var rawLinks []string
 		sourceText := ""
-		if msg.IsReply && msg.ReplyText != "" {
+		if msg.IsReply && msg.ReplyText != "" && !msg.HasMedia && msg.RawMedia == nil {
 			sourceText = msg.ReplyText
 		} else if link != "" {
 			sourceText = link
@@ -183,6 +183,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 					SenderName: msg.SenderName,
 					Text:       targetMsg.Message,
 					HasMedia:   targetMsg.Media != nil,
+					RawMedia:   targetMsg.Media,
 					ReplyToID:  targetID,
 					IsReply:    true,
 				}
@@ -409,7 +410,12 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		if mediaSource == nil && msg.IsReply && msg.ReplyToID > 0 {
 			targetMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, msg.ReplyToID)
 			if err == nil && targetMsg != nil {
-				if targetMsg.Message != "" {
+				if targetMsg.Media != nil {
+					mediaSource = targetMsg.Media
+					msg.HasMedia = true
+					msg.RawMedia = targetMsg.Media
+					link = ""
+				} else if targetMsg.Message != "" {
 					for _, tok := range strings.Fields(targetMsg.Message) {
 						if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
 							link = tok
@@ -417,16 +423,14 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 						}
 					}
 				}
-				if targetMsg.Media != nil {
-					mediaSource = targetMsg.Media
-				}
 			} else if err != nil {
 				log.Printf("[LEECH] Failed to fetch replied message %d: %v", msg.ReplyToID, err)
 				dlErr = fmt.Errorf("failed to fetch replied message: %v", err)
 			}
 		}
 
-		if link == "" && mediaSource != nil {
+		if mediaSource != nil {
+			link = ""
 			// Case 1A: Document Media (Videos, Audio, Archives, Files)
 			if docMedia, ok := mediaSource.(*tg.MessageMediaDocument); ok {
 				if doc, ok := docMedia.Document.(*tg.Document); ok {
