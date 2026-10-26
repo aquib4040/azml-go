@@ -350,56 +350,18 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			targetUploadChatID = opt.UserID
 		}
 	} else {
-		// Multi-bot upload load balancing:
-		// Check where worker bots have verified post access:
-		// 1. First priority: effectiveLogChatID (if worker bot happens to be admin there)
-		// 2. Second priority: effectiveDumpChatID (if Dump/Bin channel configured and worker bot is admin there)
-		// 3. Third priority: fromChatID (the group chat where leech was started, if worker bot is admin there)
-		if u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 {
-			if effectiveLogChatID < 0 {
-				if wBot := u.sessPool.FindBotForChat(ctx, effectiveLogChatID); wBot != nil {
-					uploadBotSession = wBot
-					clientToUse = wBot.API
-					targetUploadChatID = effectiveLogChatID
-					log.Printf("[AZML-Go Uploader] Worker bot ...%s has verified access to Leech Log %d; using for upload", wBot.SafeSuffix(), effectiveLogChatID)
-				}
-			}
-			if uploadBotSession == nil && effectiveDumpChatID < 0 {
-				if wBot := u.sessPool.FindBotForChat(ctx, effectiveDumpChatID); wBot != nil {
-					uploadBotSession = wBot
-					clientToUse = wBot.API
-					targetUploadChatID = effectiveDumpChatID
-					log.Printf("[AZML-Go Uploader] Worker bot ...%s has verified access to Dump channel %d; using for upload", wBot.SafeSuffix(), effectiveDumpChatID)
-				}
-			}
-			if uploadBotSession == nil && fromChatID < 0 {
-				if wBot := u.sessPool.FindBotForChat(ctx, fromChatID); wBot != nil {
-					uploadBotSession = wBot
-					clientToUse = wBot.API
-					targetUploadChatID = fromChatID
-					log.Printf("[AZML-Go Uploader] Worker bot ...%s has verified access to group chat %d; using for upload", wBot.SafeSuffix(), fromChatID)
-				}
-			}
+		// Uploads (< 2GB) are handled by Main Bot (u.botClient), which is guaranteed
+		// to be an Administrator in Leech Log ID (effectiveLogChatID) and has PM access to users.
+		// Worker bots are strictly reserved for multi-bot downloading from the transit bin channel.
+		clientToUse = u.botClient
+		if effectiveLogChatID != 0 {
+			targetUploadChatID = effectiveLogChatID
+		} else if opt.UserID != 0 {
+			targetUploadChatID = opt.UserID
+		} else {
+			targetUploadChatID = fromChatID
 		}
-
-		if clientToUse == nil {
-			clientToUse = u.botClient
-			if isGroupChat {
-				if effectiveLogChatID != 0 {
-					targetUploadChatID = effectiveLogChatID
-				} else if opt.UserID != 0 {
-					targetUploadChatID = opt.UserID
-				} else {
-					targetUploadChatID = fromChatID
-				}
-			} else {
-				targetUploadChatID = opt.UserID
-			}
-			log.Printf("[AZML-Go Uploader] Main Bot selected for upload (target chat %d)", targetUploadChatID)
-		}
-	}
-	if uploadBotSession != nil {
-		defer uploadBotSession.ReleaseUpload()
+		log.Printf("[AZML-Go Uploader] Main Bot selected for upload (target chat %d)", targetUploadChatID)
 	}
 
 	uploadStart := time.Now()
@@ -464,14 +426,14 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var errOnce sync.Once
 		var firstErr error
 
-		numWorkers := 6
+		numWorkers := 5
 		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
 			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 				numWorkers = val
 			}
 		}
-		if numWorkers > 10 {
-			numWorkers = 10
+		if numWorkers > 8 {
+			numWorkers = 8
 		}
 		if numWorkers < 2 {
 			numWorkers = 2
@@ -483,8 +445,11 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var wg sync.WaitGroup
 		for w := 0; w < numWorkers; w++ {
 			wg.Add(1)
-			go func() {
+			go func(workerID int) {
 				defer wg.Done()
+				// Stagger worker start to avoid simultaneous burst on connection
+				time.Sleep(time.Duration(workerID*25) * time.Millisecond)
+
 				for partIndex := range tasks {
 					if firstErr != nil || ctx.Err() != nil {
 						return
@@ -512,8 +477,11 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 					done := uploadedBytes.Add(int64(len(buf)))
 					tracker.Report(done, fileSize)
+
+					// Gentle 20ms pacing prevents Telegram DC from issuing FloodWait
+					time.Sleep(20 * time.Millisecond)
 				}
-			}()
+			}(w)
 		}
 
 		wg.Wait()
