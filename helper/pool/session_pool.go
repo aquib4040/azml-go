@@ -462,22 +462,29 @@ func (bot *BotSession) ReleaseUpload() {
 	}
 }
 
+type canPostEntry struct {
+	canPost   bool
+	expiresAt time.Time
+}
+
 // CanPostInChannel checks if this bot has posting permissions in the given channel.
 func (bot *BotSession) CanPostInChannel(ctx context.Context, chatID int64) bool {
 	rawID := RawChannelID(chatID)
 	if val, ok := bot.canPostCache.Load(rawID); ok {
-		return val.(bool)
+		if entry, ok := val.(canPostEntry); ok && time.Now().Before(entry.expiresAt) {
+			return entry.canPost
+		}
 	}
 
 	inputChan, err := bot.ResolveChannel(ctx, chatID)
 	if err != nil || inputChan == nil {
-		bot.canPostCache.Store(rawID, false)
+		bot.canPostCache.Store(rawID, canPostEntry{canPost: false, expiresAt: time.Now().Add(30 * time.Second)})
 		return false
 	}
 
 	res, err := bot.API.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChan})
 	if err != nil || res == nil {
-		bot.canPostCache.Store(rawID, false)
+		bot.canPostCache.Store(rawID, canPostEntry{canPost: false, expiresAt: time.Now().Add(30 * time.Second)})
 		return false
 	}
 
@@ -511,7 +518,11 @@ func (bot *BotSession) CanPostInChannel(ctx context.Context, chatID int64) bool 
 		}
 	}
 
-	bot.canPostCache.Store(rawID, canPost)
+	ttl := 2 * time.Minute
+	if !canPost {
+		ttl = 30 * time.Second
+	}
+	bot.canPostCache.Store(rawID, canPostEntry{canPost: canPost, expiresAt: time.Now().Add(ttl)})
 	return canPost
 }
 
