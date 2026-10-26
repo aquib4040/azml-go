@@ -253,8 +253,15 @@ func (u *TelegramUploader) uploadVideoCover(ctx context.Context, client *tg.Clie
 		return nil, fmt.Errorf("failed to upload cover file: %w", err)
 	}
 
+	// For bots (both Main Bot and all Worker Bots), Telegram MTProto requires InputPeerEmpty
+	// Only user accounts (client == u.userClient) can use InputPeerSelf
+	var uploadPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
+	if client == u.userClient {
+		uploadPeer = &tg.InputPeerSelf{}
+	}
+
 	uploadReq := &tg.MessagesUploadMediaRequest{
-		Peer: peer,
+		Peer: uploadPeer,
 		Media: &tg.InputMediaUploadedPhoto{
 			File: coverFile,
 		},
@@ -271,15 +278,7 @@ func (u *TelegramUploader) uploadVideoCover(ctx context.Context, client *tg.Clie
 			time.Sleep(d + 500*time.Millisecond)
 			continue
 		}
-		var fallbackPeer tg.InputPeerClass = &tg.InputPeerSelf{}
-		if client == u.botClient {
-			fallbackPeer = &tg.InputPeerEmpty{}
-		}
-		if uploadReq.Peer != fallbackPeer {
-			uploadReq.Peer = fallbackPeer
-			continue
-		}
-		break
+		time.Sleep(1 * time.Second)
 	}
 	if uploadErr != nil {
 		return nil, fmt.Errorf("messages.uploadMedia failed: %w", uploadErr)
@@ -329,12 +328,11 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		effectiveLogChatID = cfg.LeechLogID
 	}
 
-	effectiveDumpChatID := opt.DumpChatID
-	if effectiveDumpChatID == 0 {
-		effectiveDumpChatID = u.dumpChatID
-	}
-	if effectiveDumpChatID == 0 && cfg != nil {
-		effectiveDumpChatID = cfg.DumpChatID
+	// Transit Bin Channel: The shared channel where all worker bots and Main Bot are present.
+	// Worker bots upload directly here to keep the Leech Group Chat completely clean.
+	transitBinChatID := u.dumpChatID
+	if transitBinChatID == 0 && cfg != nil {
+		transitBinChatID = cfg.DumpChatID
 	}
 
 	var targetUploadChatID int64
@@ -344,48 +342,43 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			return nil, fmt.Errorf("file size %s exceeds 2GB limit; USER_SESSION_STRING is required to upload files > 2GB (up to 4GB)", ext.GetReadableFileSize(fileSize))
 		}
 		clientToUse = u.userClient
-		if isGroupChat {
-			if effectiveLogChatID != 0 {
-				targetUploadChatID = effectiveLogChatID
-			} else if opt.UserID != 0 {
-				targetUploadChatID = opt.UserID
-			} else {
-				targetUploadChatID = fromChatID
-			}
-		} else {
+		if transitBinChatID != 0 {
+			targetUploadChatID = transitBinChatID
+		} else if effectiveLogChatID != 0 {
+			targetUploadChatID = effectiveLogChatID
+		} else if opt.UserID != 0 {
 			targetUploadChatID = opt.UserID
+		} else {
+			targetUploadChatID = fromChatID
 		}
 	} else {
-		// Concurrent Multi-Bot Upload Routing:
-		// 1. If in a group chat, search for an available worker bot session that has posting rights
-		// in this group chat. This load-balances concurrent episode uploads across distinct worker bots:
-		// - Eliminates Telegram DC FloodWait 2s/3s on UploadSaveBigFilePart.
-		// - Multiplies upload throughput (each bot achieves ~15-20 MB/s independently).
-		if isGroupChat && fromChatID < 0 && u.sessPool != nil {
-			if wBot := u.sessPool.FindBotForChat(ctx, fromChatID); wBot != nil {
+		// Multi-worker bot upload routing:
+		// When worker bots are available, pick the least busy worker bot.
+		// That worker bot uploads directly to transitBinChatID (where all worker bots are present).
+		// Main Bot then distributes the file to Leech Log ID and User PM.
+		if u.sessPool != nil && u.sessPool.ActiveSessionCount() > 0 && transitBinChatID != 0 {
+			var wBot *pool.BotSession
+			if isGroupChat && fromChatID < 0 {
+				wBot = u.sessPool.FindBotForChat(ctx, fromChatID)
+			}
+			if wBot == nil {
+				wBot = u.sessPool.FindBotForChat(ctx, transitBinChatID)
+			}
+			if wBot != nil {
 				uploadBotSession = wBot
 				clientToUse = wBot.API
-				targetUploadChatID = fromChatID
-				log.Printf("[AZML-Go Uploader] Worker Bot ...%s selected for group upload (target chat %d, active uploads: %d)",
+				targetUploadChatID = transitBinChatID
+				log.Printf("[AZML-Go Uploader] Worker Bot ...%s selected for bin channel upload (target chat %d, active uploads: %d)",
 					wBot.SafeSuffix(), targetUploadChatID, wBot.ActiveUploads.Load())
 			}
 		}
 
-		// 2. If no worker bot found for group chat (or in PM), check if any worker bot can post directly in Leech Log ID
-		if clientToUse == nil && effectiveLogChatID != 0 && u.sessPool != nil {
-			if wBot := u.sessPool.FindBotForChat(ctx, effectiveLogChatID); wBot != nil {
-				uploadBotSession = wBot
-				clientToUse = wBot.API
-				targetUploadChatID = effectiveLogChatID
-				log.Printf("[AZML-Go Uploader] Worker Bot ...%s selected for leech log upload (target chat %d, active uploads: %d)",
-					wBot.SafeSuffix(), targetUploadChatID, wBot.ActiveUploads.Load())
-			}
-		}
-
-		// 3. Fallback: Main Bot handles upload directly to Leech Log ID or User PM
+		// Fallback: Main Bot handles upload directly to transitBinChatID, Leech Log ID, or User PM
 		if clientToUse == nil {
 			clientToUse = u.botClient
-			if effectiveLogChatID != 0 {
+			if transitBinChatID != 0 {
+				targetUploadChatID = transitBinChatID
+			} else if effectiveLogChatID != 0 {
 				targetUploadChatID = effectiveLogChatID
 			} else if opt.UserID != 0 {
 				targetUploadChatID = opt.UserID
@@ -537,12 +530,17 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	isAudio := isAudioExt(extName) && !opt.AsDoc
 
 	var thumbFile tg.InputFileClass
-	// Upload Legacy Thumbnail (320x320)
-	if opt.ThumbPath != "" {
-		if thumbHandle, tErr := uploader.NewUploader(clientToUse).FromPath(ctx, opt.ThumbPath); tErr == nil {
-			thumbFile = thumbHandle
-		} else {
-			log.Printf("[AZML-Go Uploader] Failed to upload thumb: %v", tErr)
+	thumbPathToUse := opt.ThumbPath
+	if thumbPathToUse == "" && opt.CoverPath != "" {
+		thumbPathToUse = opt.CoverPath
+	}
+	if thumbPathToUse != "" {
+		if _, statErr := os.Stat(thumbPathToUse); statErr == nil {
+			if thumbHandle, tErr := uploader.NewUploader(clientToUse).FromPath(ctx, thumbPathToUse); tErr == nil {
+				thumbFile = thumbHandle
+			} else {
+				log.Printf("[AZML-Go Uploader] Failed to upload thumb: %v", tErr)
+			}
 		}
 	}
 
@@ -568,11 +566,18 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	mimeType := "application/octet-stream"
 	if isVideo {
-		mimeType = "video/mp4"
-		if extName == ".mkv" {
-			mimeType = "video/x-matroska"
-		} else if extName == ".webm" {
-			mimeType = "video/webm"
+		// When uploading as playable streaming video (!opt.AsDoc), Telegram requires "video/mp4"
+		// so that Telegram iOS, Android, and Desktop recognize it as a playable video stream with seekbar and preview.
+		// If forced as document (opt.AsDoc), use accurate container mime (video/x-matroska, etc.).
+		if !opt.AsDoc {
+			mimeType = "video/mp4"
+		} else {
+			mimeType = "video/mp4"
+			if extName == ".mkv" {
+				mimeType = "video/x-matroska"
+			} else if extName == ".webm" {
+				mimeType = "video/webm"
+			}
 		}
 		details, _ := ext.ProbeMedia(opt.FilePath)
 		dur := 0
@@ -660,15 +665,15 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			actualDestChatID = effectiveLogChatID
 			log.Printf("[AZML-Go Uploader] Uploading directly to Leech Log channel %d", effectiveLogChatID)
 		}
-	} else if targetUploadChatID == effectiveDumpChatID && effectiveDumpChatID != 0 {
-		chID := getChannelID(effectiveDumpChatID)
+	} else if targetUploadChatID == transitBinChatID && transitBinChatID != 0 {
+		chID := getChannelID(transitBinChatID)
 		var hash int64
 		if uploadBotSession != nil {
-			if inChan, err := uploadBotSession.ResolveChannel(ctx, effectiveDumpChatID); err == nil && inChan != nil {
+			if inChan, err := uploadBotSession.ResolveChannel(ctx, transitBinChatID); err == nil && inChan != nil {
 				hash = inChan.AccessHash
 			}
 		} else {
-			hash = telegram.ResolveChannelAccessHash(ctx, clientToUse, effectiveDumpChatID)
+			hash = telegram.ResolveChannelAccessHash(ctx, clientToUse, transitBinChatID)
 			if hash == 0 {
 				hash = telegram.GetChannelAccessHash(chID)
 			}
@@ -678,8 +683,8 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 				ChannelID:  chID,
 				AccessHash: hash,
 			}
-			actualDestChatID = effectiveDumpChatID
-			log.Printf("[AZML-Go Uploader] Uploading to Dump channel %d", effectiveDumpChatID)
+			actualDestChatID = transitBinChatID
+			log.Printf("[AZML-Go Uploader] Uploading to Bin channel %d", transitBinChatID)
 		}
 	} else if targetUploadChatID == opt.UserID && opt.UserID != 0 {
 		uHash := telegram.GetUserAccessHash(opt.UserID)
@@ -692,22 +697,10 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			log.Printf("[AZML-Go Uploader] Uploading directly to User PM %d", opt.UserID)
 		}
 	} else {
-		// fromChatID (the group chat where command was given)
-		if uploadBotSession != nil && fromChatID < 0 {
-			chID := getChannelID(fromChatID)
-			if inChan, err := uploadBotSession.ResolveChannel(ctx, fromChatID); err == nil && inChan != nil {
-				uploadPeer = &tg.InputPeerChannel{
-					ChannelID:  chID,
-					AccessHash: inChan.AccessHash,
-				}
-			} else {
-				uploadPeer = peer
-			}
-		} else {
-			uploadPeer = peer
-		}
+		// Fallback to command peer
+		uploadPeer = peer
 		actualDestChatID = fromChatID
-		log.Printf("[AZML-Go Uploader] Uploading to group chat %d", fromChatID)
+		log.Printf("[AZML-Go Uploader] Uploading to command chat %d", fromChatID)
 	}
 
 	req := &tg.MessagesSendMediaRequest{
@@ -763,17 +756,40 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		sentChats := make(map[int64]bool)
 		sentChats[actualDestChatID] = true
 
+		// Build Main Bot source peer using Main Bot's own access hash (prevents CHANNEL_INVALID on forward)
+		var mainBotSourcePeer tg.InputPeerClass
+		if actualDestChatID < 0 {
+			srcChID := getChannelID(actualDestChatID)
+			srcHash := telegram.ResolveChannelAccessHash(ctx, u.botClient, actualDestChatID)
+			if srcHash == 0 {
+				srcHash = telegram.GetChannelAccessHash(srcChID)
+			}
+			mainBotSourcePeer = &tg.InputPeerChannel{
+				ChannelID:  srcChID,
+				AccessHash: srcHash,
+			}
+		} else {
+			mainBotSourcePeer = &tg.InputPeerUser{
+				UserID:     actualDestChatID,
+				AccessHash: telegram.GetUserAccessHash(actualDestChatID),
+			}
+		}
+
 		// 0. Send to User Personal Dump channel (if user explicitly configured /setdump or -dump)
 		if opt.DumpChatID != 0 && actualDestChatID != opt.DumpChatID && !sentChats[opt.DumpChatID] {
 			sentChats[opt.DumpChatID] = true
 			if !copyMessageViaBotAPI(botToken, opt.DumpChatID, actualDestChatID, msgID) {
 				chID := getChannelID(opt.DumpChatID)
+				dumpHash := telegram.ResolveChannelAccessHash(ctx, u.botClient, opt.DumpChatID)
+				if dumpHash == 0 {
+					dumpHash = telegram.GetChannelAccessHash(chID)
+				}
 				dumpPeer := &tg.InputPeerChannel{
 					ChannelID:  chID,
-					AccessHash: telegram.GetChannelAccessHash(chID),
+					AccessHash: dumpHash,
 				}
 				_, dErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer:   uploadPeer,
+					FromPeer:   mainBotSourcePeer,
 					ToPeer:     dumpPeer,
 					ID:         []int{msgID},
 					RandomID:   []int64{time.Now().UnixNano() + 1},
@@ -794,7 +810,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 					AccessHash: telegram.GetUserAccessHash(opt.UserID),
 				}
 				_, pErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer:   uploadPeer,
+					FromPeer:   mainBotSourcePeer,
 					ToPeer:     userPeer,
 					ID:         []int{msgID},
 					RandomID:   []int64{time.Now().UnixNano() + 3},
@@ -811,12 +827,16 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			sentChats[effectiveLogChatID] = true
 			if !copyMessageViaBotAPI(botToken, effectiveLogChatID, actualDestChatID, msgID) {
 				chID := getChannelID(effectiveLogChatID)
+				logHash := telegram.ResolveChannelAccessHash(ctx, u.botClient, effectiveLogChatID)
+				if logHash == 0 {
+					logHash = telegram.GetChannelAccessHash(chID)
+				}
 				logPeer := &tg.InputPeerChannel{
 					ChannelID:  chID,
-					AccessHash: telegram.GetChannelAccessHash(chID),
+					AccessHash: logHash,
 				}
 				_, fErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer:   uploadPeer,
+					FromPeer:   mainBotSourcePeer,
 					ToPeer:     logPeer,
 					ID:         []int{msgID},
 					RandomID:   []int64{time.Now().UnixNano() + 2},
