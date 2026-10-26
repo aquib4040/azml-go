@@ -398,7 +398,11 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		if r.MessageID == 0 {
 			continue
 		}
-		if !force && time.Since(r.LastEdit) < 3*time.Second {
+		minInterval := 3 * time.Second
+		if force {
+			minInterval = 1500 * time.Millisecond
+		}
+		if time.Since(r.LastEdit) < minInterval {
 			continue
 		}
 
@@ -423,6 +427,13 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 			if strings.Contains(errStr, "MESSAGE_NOT_MODIFIED") {
 				m.mu.Lock()
 				r.LastEdit = time.Now()
+				m.mu.Unlock()
+				continue
+			}
+			// Rate limits / FloodWait / Too Many Requests: back off without dropping status tracking
+			if strings.Contains(errStr, "TOO MANY REQUESTS") || strings.Contains(errStr, "RETRY AFTER") || strings.Contains(errStr, "FLOOD") {
+				m.mu.Lock()
+				r.LastEdit = time.Now().Add(3 * time.Second)
 				m.mu.Unlock()
 				continue
 			}

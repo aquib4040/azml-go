@@ -314,6 +314,12 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 	var clientToUse *tg.Client
 	var uploadBotSession *pool.BotSession
 
+	defer func() {
+		if uploadBotSession != nil {
+			uploadBotSession.ReleaseUpload()
+		}
+	}()
+
 	fromChatID := telegram.PeerToChatID(peer)
 	isGroupChat := (fromChatID != opt.UserID)
 
@@ -350,18 +356,44 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			targetUploadChatID = opt.UserID
 		}
 	} else {
-		// Uploads (< 2GB) are handled by Main Bot (u.botClient), which is guaranteed
-		// to be an Administrator in Leech Log ID (effectiveLogChatID) and has PM access to users.
-		// Worker bots are strictly reserved for multi-bot downloading from the transit bin channel.
-		clientToUse = u.botClient
-		if effectiveLogChatID != 0 {
-			targetUploadChatID = effectiveLogChatID
-		} else if opt.UserID != 0 {
-			targetUploadChatID = opt.UserID
-		} else {
-			targetUploadChatID = fromChatID
+		// Concurrent Multi-Bot Upload Routing:
+		// 1. If in a group chat, search for an available worker bot session that has posting rights
+		// in this group chat. This load-balances concurrent episode uploads across distinct worker bots:
+		// - Eliminates Telegram DC FloodWait 2s/3s on UploadSaveBigFilePart.
+		// - Multiplies upload throughput (each bot achieves ~15-20 MB/s independently).
+		if isGroupChat && fromChatID < 0 && u.sessPool != nil {
+			if wBot := u.sessPool.FindBotForChat(ctx, fromChatID); wBot != nil {
+				uploadBotSession = wBot
+				clientToUse = wBot.API
+				targetUploadChatID = fromChatID
+				log.Printf("[AZML-Go Uploader] Worker Bot ...%s selected for group upload (target chat %d, active uploads: %d)",
+					wBot.SafeSuffix(), targetUploadChatID, wBot.ActiveUploads.Load())
+			}
 		}
-		log.Printf("[AZML-Go Uploader] Main Bot selected for upload (target chat %d)", targetUploadChatID)
+
+		// 2. If no worker bot found for group chat (or in PM), check if any worker bot can post directly in Leech Log ID
+		if clientToUse == nil && effectiveLogChatID != 0 && u.sessPool != nil {
+			if wBot := u.sessPool.FindBotForChat(ctx, effectiveLogChatID); wBot != nil {
+				uploadBotSession = wBot
+				clientToUse = wBot.API
+				targetUploadChatID = effectiveLogChatID
+				log.Printf("[AZML-Go Uploader] Worker Bot ...%s selected for leech log upload (target chat %d, active uploads: %d)",
+					wBot.SafeSuffix(), targetUploadChatID, wBot.ActiveUploads.Load())
+			}
+		}
+
+		// 3. Fallback: Main Bot handles upload directly to Leech Log ID or User PM
+		if clientToUse == nil {
+			clientToUse = u.botClient
+			if effectiveLogChatID != 0 {
+				targetUploadChatID = effectiveLogChatID
+			} else if opt.UserID != 0 {
+				targetUploadChatID = opt.UserID
+			} else {
+				targetUploadChatID = fromChatID
+			}
+			log.Printf("[AZML-Go Uploader] Main Bot selected for upload (target chat %d)", targetUploadChatID)
+		}
 	}
 
 	uploadStart := time.Now()
@@ -661,7 +693,19 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		}
 	} else {
 		// fromChatID (the group chat where command was given)
-		uploadPeer = peer
+		if uploadBotSession != nil && fromChatID < 0 {
+			chID := getChannelID(fromChatID)
+			if inChan, err := uploadBotSession.ResolveChannel(ctx, fromChatID); err == nil && inChan != nil {
+				uploadPeer = &tg.InputPeerChannel{
+					ChannelID:  chID,
+					AccessHash: inChan.AccessHash,
+				}
+			} else {
+				uploadPeer = peer
+			}
+		} else {
+			uploadPeer = peer
+		}
 		actualDestChatID = fromChatID
 		log.Printf("[AZML-Go Uploader] Uploading to group chat %d", fromChatID)
 	}

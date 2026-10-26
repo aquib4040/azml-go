@@ -387,7 +387,7 @@ func PeerToChatID(peer tg.InputPeerClass) int64 {
 	return 0
 }
 
-var botAPIHTTPClient = &http.Client{Timeout: 5 * time.Second}
+var botAPIHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 func getBotToken() string {
 	if cfg := config.Get(); cfg != nil && cfg.BotToken != "" {

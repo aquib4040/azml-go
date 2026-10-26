@@ -110,6 +110,11 @@ func (bot *BotSession) EndDownload() {
 	}
 }
 
+func (bot *BotSession) StartUpload() {
+	bot.ActiveUploads.Add(1)
+	bot.Touch()
+}
+
 func (bot *BotSession) AcquireChunkLoad() {
 	bot.InFlightChunks.Add(1)
 	bot.Touch()
@@ -451,7 +456,9 @@ func (bot *BotSession) ResolveChannel(ctx context.Context, chatID int64) (*tg.In
 
 func (bot *BotSession) ReleaseUpload() {
 	if bot != nil {
-		bot.ActiveUploads.Add(-1)
+		if count := bot.ActiveUploads.Add(-1); count < 0 {
+			bot.ActiveUploads.Store(0)
+		}
 	}
 }
 
@@ -485,9 +492,21 @@ func (bot *BotSession) CanPostInChannel(ctx context.Context, chatID int64) bool 
 	canPost := false
 	for _, chat := range chats {
 		if ch, ok := chat.(*tg.Channel); ok && ch.ID == rawID {
-			if ch.Creator || ch.AdminRights.PostMessages {
+			if ch.Creator {
 				canPost = true
 				break
+			}
+			if ch.Broadcast {
+				if ch.AdminRights.PostMessages {
+					canPost = true
+					break
+				}
+			} else {
+				// Supergroup / Group chat: check admin rights or unbanned sender permissions
+				if ch.AdminRights.PostMessages || ch.AdminRights.Other || ch.AdminRights.DeleteMessages || ch.AdminRights.BanUsers || !ch.DefaultBannedRights.SendMessages {
+					canPost = true
+					break
+				}
 			}
 		}
 	}
@@ -857,7 +876,8 @@ func (p *SessionPool) GetNextAvailable(tokens []string, apiID int, apiHash strin
 	return nil, fmt.Errorf("no ready gotd bot sessions available in pool")
 }
 
-// FindBotForChat checks if any worker bot is a member/admin in the specified group/channel.
+// FindBotForChat checks if any worker bot is a member/admin with posting rights in the specified group/channel,
+// and returns the least-busy bot session.
 func (p *SessionPool) FindBotForChat(ctx context.Context, chatID int64) *BotSession {
 	if chatID >= 0 {
 		return nil // User PMs are private to the bot the user started
@@ -866,22 +886,33 @@ func (p *SessionPool) FindBotForChat(ctx context.Context, chatID int64) *BotSess
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	var bestBot *BotSession
+	var minActive int32 = 999999
+
 	for _, bot := range p.sessions {
 		if !p.IsTokenInvalid(bot.Token) {
 			select {
 			case <-bot.ready:
 				if bot.readyErr == nil && !bot.IsCooling() {
 					checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-					inChan, err := bot.ResolveChannel(checkCtx, chatID)
+					canPost := bot.CanPostInChannel(checkCtx, chatID)
 					cancel()
-					if err == nil && inChan != nil {
-						bot.ActiveUploads.Add(1)
-						return bot
+					if canPost {
+						active := bot.ActiveUploads.Load()
+						if active < minActive {
+							minActive = active
+							bestBot = bot
+						}
 					}
 				}
 			default:
 			}
 		}
+	}
+
+	if bestBot != nil {
+		bestBot.StartUpload()
+		return bestBot
 	}
 	return nil
 }
