@@ -1102,6 +1102,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			if err := ext.EditMetadata(curFile, outMeta, user.Metadata); err == nil {
 				_ = os.Remove(curFile)
 				curFile = outMeta
+			} else {
+				log.Printf("[LEECH Metadata] Warning: EditMetadata failed for %s: %v (using original)", origBase, err)
 			}
 		}
 

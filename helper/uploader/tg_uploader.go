@@ -165,7 +165,7 @@ func isTransientUploadError(err error) bool {
 	return false
 }
 
-func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte) error {
+func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte, floodUntil *atomic.Int64) error {
 	const maxAttempts = 25
 	attempt := 0
 	floodWaitAttempts := 0
@@ -176,6 +176,21 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Coordinated pause: if any worker hit FloodWait, pause immediately before making RPC
+		if floodUntil != nil {
+			if until := floodUntil.Load(); until > 0 {
+				nowMs := time.Now().UnixMilli()
+				if until > nowMs {
+					waitRemaining := time.Duration(until-nowMs) * time.Millisecond
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(waitRemaining):
+					}
+				}
+			}
 		}
 
 		partCtx, partCancel := context.WithTimeout(ctx, 90*time.Second)
@@ -203,11 +218,15 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			if waitTime < 1*time.Second {
 				waitTime = 1 * time.Second
 			}
+			// Coordinate with all workers on this upload to pause
+			if floodUntil != nil {
+				floodUntil.Store(time.Now().Add(waitTime + 400*time.Millisecond).UnixMilli())
+			}
 			log.Printf("[AZML-Go Uploader] FloodWait of %v on part %d/%d. Waiting...", waitTime, partIndex, totalParts)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(waitTime + time.Duration(rand.Intn(500))*time.Millisecond):
+			case <-time.After(waitTime + time.Duration(rand.Intn(400))*time.Millisecond):
 			}
 			continue
 		}
@@ -260,37 +279,49 @@ func (u *TelegramUploader) uploadVideoCover(ctx context.Context, client *tg.Clie
 		uploadPeer = &tg.InputPeerEmpty{}
 	}
 
-	uploadReq := &tg.MessagesUploadMediaRequest{
-		Peer: uploadPeer,
-		Media: &tg.InputMediaUploadedPhoto{
-			File: coverFile,
-		},
+	// Try with the actual target peer first, then fallback to Main Bot's peer if it fails
+	peersToTry := []tg.InputPeerClass{uploadPeer}
+	if u.botClient != nil && u.botClient != client {
+		peersToTry = append(peersToTry, &tg.InputPeerEmpty{})
 	}
 
-	var mediaRes tg.MessageMediaClass
-	var uploadErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		mediaRes, uploadErr = client.MessagesUploadMedia(ctx, uploadReq)
+	for _, tryPeer := range peersToTry {
+		uploadReq := &tg.MessagesUploadMediaRequest{
+			Peer: tryPeer,
+			Media: &tg.InputMediaUploadedPhoto{
+				File: coverFile,
+			},
+		}
+
+		var mediaRes tg.MessageMediaClass
+		var uploadErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			mediaRes, uploadErr = client.MessagesUploadMedia(ctx, uploadReq)
+			if uploadErr == nil {
+				break
+			}
+			if d, ok := tgerr.AsFloodWait(uploadErr); ok {
+				time.Sleep(d + 500*time.Millisecond)
+				continue
+			}
+			errStr := uploadErr.Error()
+			if strings.Contains(errStr, "PEER_ID_INVALID") || strings.Contains(errStr, "CHAT_ADMIN_REQUIRED") || strings.Contains(errStr, "CHANNEL_INVALID") {
+				break // try next peer
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 		if uploadErr == nil {
-			break
-		}
-		if d, ok := tgerr.AsFloodWait(uploadErr); ok {
-			time.Sleep(d + 500*time.Millisecond)
-			continue
-		}
-		time.Sleep(1 * time.Second)
-	}
-	if uploadErr != nil {
-		return nil, fmt.Errorf("messages.uploadMedia failed: %w", uploadErr)
-	}
-
-	if photoMedia, ok := mediaRes.(*tg.MessageMediaPhoto); ok {
-		if p, ok := photoMedia.Photo.(*tg.Photo); ok {
-			return p.AsInput(), nil
+			if photoMedia, ok := mediaRes.(*tg.MessageMediaPhoto); ok {
+				if p, ok := photoMedia.Photo.(*tg.Photo); ok {
+					return p.AsInput(), nil
+				}
+			}
 		}
 	}
 
-	return nil, fmt.Errorf("unexpected media response type %T", mediaRes)
+	// If all peer attempts failed, skip video cover (thumbFile will still be used)
+	log.Printf("[AZML-Go Uploader] Video cover upload failed for all peers, skipping (thumb will still be attached)")
+	return nil, nil
 }
 
 func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClass, opt UploadOptions) (*tg.UpdatesClass, error) {
@@ -442,14 +473,14 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var errOnce sync.Once
 		var firstErr error
 
-		numWorkers := 5
+		numWorkers := 4
 		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
 			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 				numWorkers = val
 			}
 		}
-		if numWorkers > 8 {
-			numWorkers = 8
+		if numWorkers > 6 {
+			numWorkers = 6
 		}
 		if numWorkers < 2 {
 			numWorkers = 2
@@ -458,13 +489,18 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			numWorkers = int(totalParts)
 		}
 
+		// Global upload pacing mutex: serializes the actual RPC dispatch to prevent burst FloodWait
+		var pacingMu sync.Mutex
+		var lastDispatch time.Time
+		var clientFloodUntil atomic.Int64
+
 		var wg sync.WaitGroup
 		for w := 0; w < numWorkers; w++ {
 			wg.Add(1)
 			go func(workerID int) {
 				defer wg.Done()
-				// Stagger worker start to avoid simultaneous burst on connection
-				time.Sleep(time.Duration(workerID*25) * time.Millisecond)
+				// Stagger worker start to spread initial burst
+				time.Sleep(time.Duration(workerID*80) * time.Millisecond)
 
 				for partIndex := range tasks {
 					if firstErr != nil || ctx.Err() != nil {
@@ -483,7 +519,17 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 						return
 					}
 
-					saveErr := saveBigFilePartWithRetry(ctx, clientToUse, fileID, int(partIndex), int(totalParts), buf)
+					// Global pacing: ensure minimum 60ms between consecutive RPC dispatches
+					pacingMu.Lock()
+					if !lastDispatch.IsZero() {
+						if elapsed := time.Since(lastDispatch); elapsed < 60*time.Millisecond {
+							time.Sleep(60*time.Millisecond - elapsed)
+						}
+					}
+					lastDispatch = time.Now()
+					pacingMu.Unlock()
+
+					saveErr := saveBigFilePartWithRetry(ctx, clientToUse, fileID, int(partIndex), int(totalParts), buf, &clientFloodUntil)
 					if saveErr != nil {
 						errOnce.Do(func() {
 							firstErr = fmt.Errorf("UploadSaveBigFilePart failed for part %d: %w", partIndex, saveErr)
@@ -493,9 +539,6 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 					done := uploadedBytes.Add(int64(len(buf)))
 					tracker.Report(done, fileSize)
-
-					// Gentle 20ms pacing prevents Telegram DC from issuing FloodWait
-					time.Sleep(20 * time.Millisecond)
 				}
 			}(w)
 		}
@@ -621,17 +664,26 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	mimeType := "application/octet-stream"
 	if isVideo {
-		// When uploading as playable streaming video (!opt.AsDoc), Telegram requires "video/mp4"
-		// so that Telegram iOS, Android, and Desktop recognize it as a playable video stream with seekbar and preview.
-		// If forced as document (opt.AsDoc), use accurate container mime (video/x-matroska, etc.).
-		if !opt.AsDoc {
+		realExt := ext.DetectExtension(opt.FilePath)
+		effectiveExt := extName
+		if realExt != "" {
+			effectiveExt = realExt
+		}
+
+		if !opt.AsDoc && (effectiveExt == ".mp4" || extName == ".mp4") {
 			mimeType = "video/mp4"
 		} else {
-			mimeType = "video/mp4"
-			if extName == ".mkv" {
+			switch effectiveExt {
+			case ".mkv":
 				mimeType = "video/x-matroska"
-			} else if extName == ".webm" {
+			case ".webm":
 				mimeType = "video/webm"
+			case ".mp4", ".m4v":
+				mimeType = "video/mp4"
+			case ".avi":
+				mimeType = "video/x-msvideo"
+			default:
+				mimeType = "video/mp4"
 			}
 		}
 		details, _ := ext.ProbeMedia(opt.FilePath)
@@ -708,6 +760,16 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		res, sendErr = clientToUse.MessagesSendMedia(ctx, req)
 		if sendErr == nil {
 			break
+		}
+		// Handle FloodWait on SendMedia
+		if d, ok := tgerr.AsFloodWait(sendErr); ok {
+			waitDur := d
+			if waitDur < 1*time.Second {
+				waitDur = 1 * time.Second
+			}
+			log.Printf("[AZML-Go Uploader] FloodWait %v on MessagesSendMedia (attempt %d/10), waiting...", waitDur, attempt+1)
+			time.Sleep(waitDur + 500*time.Millisecond)
+			continue
 		}
 		// Fallback to command peer if sending to preferred peer failed (only for Main Bot)
 		if uploadBotSession == nil && uploadPeer != peer && attempt == 0 {

@@ -259,9 +259,17 @@ func FormatFilename(filename string, user *types.UserSettings, filePath string) 
 		formatted = base + suffix + ext
 	}
 
-	if filepath.Ext(formatted) == "" && filePath != "" {
+	if filePath != "" {
+		currentExt := filepath.Ext(formatted)
 		if detectedExt := DetectExtension(filePath); detectedExt != "" {
-			formatted += detectedExt
+			if currentExt == "" {
+				formatted += detectedExt
+			} else if (detectedExt == ".mkv" && strings.EqualFold(currentExt, ".mp4")) ||
+				(detectedExt == ".webm" && strings.EqualFold(currentExt, ".mp4")) ||
+				(detectedExt == ".mp4" && strings.EqualFold(currentExt, ".mkv")) {
+				// Prevent container-extension mismatch which corrupts media parsing and previews
+				formatted = strings.TrimSuffix(formatted, currentExt) + detectedExt
+			}
 		}
 	}
 
@@ -570,7 +578,8 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 			cmd := exec.Command("ffmpeg",
 				"-hide_banner", "-loglevel", "error",
 				"-i", customThumbPath,
-				"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+				"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+				"-pix_fmt", "yuvj420p",
 				"-q:v", "2",
 				outThumb, "-y",
 			)
@@ -592,13 +601,14 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 
 	outThumb := filepath.Join(os.TempDir(), fmt.Sprintf("thumb_%s.jpg", RandomHex(4)))
 
-	// Primary attempt: fast input seeking
+	// Primary attempt: fast input seeking with even dimension scaling
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-ss", strconv.Itoa(captureSec),
 		"-i", filePath,
 		"-vframes", "1",
-		"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outThumb, "-y",
 	)
@@ -608,13 +618,14 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 		}
 	}
 
-	// Fallback attempt: accurate output seeking at 2s
+	// Fallback attempt 1: accurate output seeking at 2s
 	cmdFallback := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-i", filePath,
 		"-ss", "00:00:02",
 		"-vframes", "1",
-		"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outThumb, "-y",
 	)
@@ -623,6 +634,23 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 			return outThumb
 		}
 	}
+
+	// Fallback attempt 2: frame 0 without seek (guaranteed for short / tricky files)
+	cmdFallback0 := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-vframes", "1",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
+		"-q:v", "2",
+		outThumb, "-y",
+	)
+	if cmdFallback0.Run() == nil {
+		if fi, sErr := os.Stat(outThumb); sErr == nil && fi.Size() > 0 {
+			return outThumb
+		}
+	}
+
 	return ""
 }
 
@@ -649,6 +677,8 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 		"-ss", strconv.Itoa(captureSec),
 		"-i", filePath,
 		"-vframes", "1",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outCover, "-y",
 	)
@@ -663,6 +693,8 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 		"-i", filePath,
 		"-ss", "00:00:02",
 		"-vframes", "1",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outCover, "-y",
 	)
@@ -671,6 +703,23 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 			return outCover
 		}
 	}
+
+	// Fallback 0: first frame
+	cmdFallback0 := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-vframes", "1",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
+		"-q:v", "2",
+		outCover, "-y",
+	)
+	if cmdFallback0.Run() == nil {
+		if fi, sErr := os.Stat(outCover); sErr == nil && fi.Size() > 0 {
+			return outCover
+		}
+	}
+
 	return ""
 }
 

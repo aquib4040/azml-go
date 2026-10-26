@@ -158,6 +158,9 @@ func EditMetadata(inputFile, outputFile string, meta map[string]string) error {
 	subtitle := getVal("subtitle")
 	site := getVal("site")
 
+	outExt := strings.ToLower(filepath.Ext(outputFile))
+	isMP4 := outExt == ".mp4" || outExt == ".m4v"
+
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
@@ -165,12 +168,9 @@ func EditMetadata(inputFile, outputFile string, meta map[string]string) error {
 		"-i", inputFile,
 	}
 
-	metaArgs := []string{
-		"-map_metadata", "-1",
-		"-map_chapters", "-1",
-	}
+	var metaArgs []string
 
-	titleTags := []string{"title", "TITLE", "Title", "movie", "show", "series"}
+	titleTags := []string{"title", "TITLE", "Title"}
 	if title != "" {
 		for _, tag := range titleTags {
 			metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("%s=%s", tag, title))
@@ -178,30 +178,30 @@ func EditMetadata(inputFile, outputFile string, meta map[string]string) error {
 		metaArgs = append(metaArgs, "-metadata:s:v", fmt.Sprintf("title=%s", title))
 	}
 
-	descTags := []string{"description", "comment", "synopsis", "summary"}
+	descTags := []string{"description", "comment"}
 	if description != "" {
 		for _, tag := range descTags {
-			metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("%s=%s", tag, description), "-metadata:s", fmt.Sprintf("%s=%s", tag, description))
+			metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("%s=%s", tag, description))
 		}
 	}
 
-	artistTags := []string{"artist", "author", "encoded_by", "encoder"}
+	artistTags := []string{"artist", "author", "encoded_by"}
 	if artist != "" {
 		for _, tag := range artistTags {
-			metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("%s=%s", tag, artist), "-metadata:s", fmt.Sprintf("%s=%s", tag, artist))
+			metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("%s=%s", tag, artist))
 		}
 	}
 
 	if album != "" {
-		metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("album=%s", album), "-metadata:s", fmt.Sprintf("album=%s", album))
+		metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("album=%s", album))
 	}
 
 	if year != "" {
-		metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("date=%s", year), "-metadata:s", fmt.Sprintf("date=%s", year))
+		metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("date=%s", year))
 	}
 
 	if site != "" {
-		metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("official_site=%s", site), "-metadata:s", fmt.Sprintf("official_site=%s", site))
+		metaArgs = append(metaArgs, "-metadata", fmt.Sprintf("official_site=%s", site))
 	}
 
 	if audio != "" {
@@ -213,23 +213,34 @@ func EditMetadata(inputFile, outputFile string, meta map[string]string) error {
 	}
 
 	args = append(args, metaArgs...)
-	args = append(args,
-		"-map", "0:v:0?",
-		"-map", "0:a:?",
-		"-map", "0:s:?",
-		"-map", "0:t?",
-		"-c:v", "copy",
-		"-c:a", "copy",
-		"-c:s", "copy",
-		"-c:t", "copy",
-		outputFile,
-		"-y",
-	)
+
+	if isMP4 {
+		// MP4 container: stream copy video and audio, faststart moov atom at beginning for streaming
+		args = append(args,
+			"-map", "0:v:0?",
+			"-map", "0:a?",
+			"-c:v", "copy",
+			"-c:a", "copy",
+			"-movflags", "+faststart",
+		)
+	} else {
+		// Matroska/MKV: preserve all video, audio, subtitles, and attachments
+		args = append(args,
+			"-map", "0:v:0?",
+			"-map", "0:a?",
+			"-map", "0:s?",
+			"-map", "0:t?",
+			"-c", "copy",
+		)
+	}
+
+	args = append(args, outputFile, "-y")
 
 	cmd := exec.Command("ffmpeg", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		_ = os.Remove(outputFile)
 		return fmt.Errorf("ffmpeg metadata failed: %v, stderr: %s", err, stderr.String())
 	}
 	return nil
