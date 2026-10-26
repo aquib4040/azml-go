@@ -28,35 +28,32 @@ func computeTargetWorkers(activeDownloads int64, totalBots int, numTasks int) in
 		totalBots = 1
 	}
 
-	var target int
-	if activeDownloads <= 1 {
-		// Single file download: 4 to 6 parallel workers across the bots
-		target = 6
-		if target > totalBots {
-			target = totalBots
-		}
-	} else if activeDownloads <= 3 {
-		// 2-3 concurrent downloads: 2-3 workers per file
-		target = 3
-	} else {
-		// 4+ concurrent downloads (e.g. 5 to 10 files):
-		// 1-2 workers per file ensures total workers across all files <= 12-16!
-		// Prevents Heroku R14 memory spikes and Telegram IP connection rate limits!
-		target = 2
-	}
-
 	// Environment variable manual override
 	if envVal := os.Getenv("DOWNLOAD_THREADS"); envVal != "" {
 		if val, err := strconv.Atoi(envVal); err == nil && val > 0 {
-			target = val
+			if val > numTasks {
+				val = numTasks
+			}
+			return val
 		}
+	}
+
+	// Fair allocation: For up to 4 concurrent downloads (the configured maximum),
+	// maintain 5 to 6 workers per file so download speed stays consistently high (>10 MB/s).
+	var target int
+	if activeDownloads <= 1 {
+		target = 6
+	} else if activeDownloads <= 4 {
+		target = 5
+	} else {
+		target = 4
 	}
 
 	if target > numTasks {
 		target = numTasks
 	}
-	if target < 1 {
-		target = 1
+	if target < 2 {
+		target = 2
 	}
 	return target
 }
@@ -175,6 +172,7 @@ func (m *MultiBotDownloader) DownloadToFile(
 	var lastReportTime = startTime
 	var trackerMu sync.Mutex
 
+	var smoothSpeed float64
 	reportProgress := func(curr int64) {
 		if onProgress == nil {
 			return
@@ -184,12 +182,18 @@ func (m *MultiBotDownloader) DownloadToFile(
 
 		now := time.Now()
 		elapsed := now.Sub(lastReportTime).Seconds()
-		if elapsed >= 0.5 || curr == fileSize {
+		if elapsed >= 0.8 || curr == fileSize {
 			delta := curr - lastReportBytes
-			speed := 0.0
+			instantSpeed := 0.0
 			if elapsed > 0 {
-				speed = float64(delta) / elapsed
+				instantSpeed = float64(delta) / elapsed
 			}
+			if smoothSpeed <= 0 {
+				smoothSpeed = instantSpeed
+			} else if instantSpeed > 0 {
+				smoothSpeed = smoothSpeed*0.7 + instantSpeed*0.3
+			}
+			speed := smoothSpeed
 			eta := "-"
 			rem := fileSize - curr
 			if speed > 0 && rem > 0 {
@@ -234,6 +238,13 @@ func (m *MultiBotDownloader) DownloadToFile(
 					return
 				}
 
+				if int64(len(data)) < actualBytes {
+					errOnce.Do(func() {
+						firstErr = fmt.Errorf("download incomplete at part %d/%d (offset %d): expected %d bytes, got %d", partIndex+1, totalParts, offset, actualBytes, len(data))
+						workerCancel()
+					})
+					return
+				}
 				if int64(len(data)) > actualBytes {
 					data = data[:actualBytes]
 				}
@@ -262,6 +273,11 @@ func (m *MultiBotDownloader) DownloadToFile(
 	}
 
 	_ = out.Sync()
+	if fi, sErr := out.Stat(); sErr == nil {
+		if fi.Size() != fileSize {
+			return fmt.Errorf("downloaded file size mismatch: expected %d bytes, got %d bytes", fileSize, fi.Size())
+		}
+	}
 	reportProgress(fileSize)
 	return nil
 }

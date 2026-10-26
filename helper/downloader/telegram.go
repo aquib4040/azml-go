@@ -34,10 +34,18 @@ func NewTelegramChunkDownloader(client *tg.Client) *TelegramChunkDownloader {
 	d := &TelegramChunkDownloader{
 		client: client,
 	}
-	// Default minimum interval between chunk requests: 180ms (~5.5 MB/s ceiling)
-	// Keeps request throughput smoothly under Telegram's MTProto flood-wait bucket.
-	d.minIntervalNs.Store(180 * int64(time.Millisecond))
+	// Default minimum interval between chunk requests: 50ms (~20 MB/s line capacity).
+	// Keeps throughput fast while avoiding MTProto connection queue drop.
+	d.minIntervalNs.Store(50 * int64(time.Millisecond))
 	return d
+}
+
+func (d *TelegramChunkDownloader) decayPacing() {
+	curr := d.minIntervalNs.Load()
+	base := int64(50 * time.Millisecond)
+	if curr > base {
+		d.minIntervalNs.Store(curr - int64(5*time.Millisecond))
+	}
 }
 
 func (d *TelegramChunkDownloader) waitGlobalFlood(ctx context.Context) error {
@@ -131,7 +139,7 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 
 	_ = out.Truncate(fileSize)
 
-	numWorkers := 2
+	numWorkers := 5
 	if envVal := os.Getenv("DOWNLOAD_THREADS"); envVal != "" {
 		if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 			numWorkers = val
@@ -139,6 +147,9 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 	}
 	if numWorkers > 8 {
 		numWorkers = 8
+	}
+	if numWorkers < 2 {
+		numWorkers = 2
 	}
 	if totalParts < numWorkers {
 		numWorkers = totalParts
@@ -170,6 +181,7 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 	var lastReportBytes int64
 	var lastReportTime = startTime
 	var trackerMu sync.Mutex
+	var smoothSpeed float64
 
 	reportProgress := func(curr int64) {
 		if onProgress == nil {
@@ -180,12 +192,18 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 
 		now := time.Now()
 		elapsed := now.Sub(lastReportTime).Seconds()
-		if elapsed >= 0.5 || curr == fileSize {
+		if elapsed >= 0.8 || curr == fileSize {
 			delta := curr - lastReportBytes
-			speed := 0.0
+			instantSpeed := 0.0
 			if elapsed > 0 {
-				speed = float64(delta) / elapsed
+				instantSpeed = float64(delta) / elapsed
 			}
+			if smoothSpeed <= 0 {
+				smoothSpeed = instantSpeed
+			} else if instantSpeed > 0 {
+				smoothSpeed = smoothSpeed*0.7 + instantSpeed*0.3
+			}
+			speed := smoothSpeed
 			eta := "-"
 			rem := fileSize - curr
 			if speed > 0 && rem > 0 {
@@ -235,6 +253,13 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 					data = data[:actualBytes]
 				}
 
+				if int64(len(data)) < actualBytes {
+					errOnce.Do(func() {
+						firstErr = fmt.Errorf("incomplete chunk at part %d/%d (offset %d): got %d bytes, expected %d", partIndex+1, totalParts, offset, len(data), actualBytes)
+					})
+					return
+				}
+
 				if _, wErr := out.WriteAt(data, offset); wErr != nil {
 					errOnce.Do(func() {
 						firstErr = fmt.Errorf("failed to write part %d to disk: %w", partIndex+1, wErr)
@@ -258,6 +283,11 @@ func (d *TelegramChunkDownloader) DownloadToFile(
 	}
 
 	_ = out.Sync()
+	if fi, sErr := out.Stat(); sErr == nil {
+		if fi.Size() != fileSize {
+			return fmt.Errorf("downloaded file size mismatch: got %d bytes, expected %d bytes", fi.Size(), fileSize)
+		}
+	}
 	reportProgress(fileSize)
 	return nil
 }
@@ -316,6 +346,7 @@ func (d *TelegramChunkDownloader) getPartWithRetry(
 					}
 					continue
 				}
+				d.decayPacing()
 				return f.Bytes, nil
 			default:
 				return nil, fmt.Errorf("unexpected file response %T", res)

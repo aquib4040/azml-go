@@ -52,7 +52,7 @@ type BotApp struct {
 	leechHandler          func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool)
 	ytdlHandler           func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	statusHandler         func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	statusCbHandler       func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string)
+	statusCbHandler       func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	cancelHandler         func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelAllHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelCbHandler       func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
@@ -223,7 +223,7 @@ func (b *BotApp) SetLeechHandler(h func(ctx context.Context, peer tg.InputPeerCl
 func (b *BotApp) SetYtdlHandler(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
 	b.ytdlHandler = h
 }
-func (b *BotApp) SetStatusHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string)) {
+func (b *BotApp) SetStatusHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)) {
 	b.statusHandler = h
 	b.statusCbHandler = cb
 }
@@ -371,7 +371,9 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		if !u.StartedInPM {
 			u.StartedInPM = true
 			b.userMap.Set(u)
-			_ = ext.DB.SaveUser(u)
+			go func(usr *types.UserSettings) {
+				_ = ext.DB.SaveUser(usr)
+			}(u)
 		}
 	}
 
@@ -686,7 +688,7 @@ func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuer
 		}
 	case strings.HasPrefix(data, "status"):
 		if b.statusCbHandler != nil {
-			b.statusCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data)
+			b.statusCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data, cb.UserID)
 		}
 	case strings.HasPrefix(data, "canall"):
 		if b.cancelCbHandler != nil {
@@ -1095,6 +1097,26 @@ func getPeerID(p tg.PeerClass) int64 {
 	return 0
 }
 
+func (b *BotApp) getPeerForChatID(chatID int64) tg.InputPeerClass {
+	if chatID > 0 {
+		accessHashMu.RLock()
+		hash := userAccessHashes[chatID]
+		accessHashMu.RUnlock()
+		if hash == 0 {
+			hash = telegram.GetUserAccessHash(chatID)
+		}
+		return &tg.InputPeerUser{UserID: chatID, AccessHash: hash}
+	}
+	rawChanID := pool.RawChannelID(chatID)
+	accessHashMu.RLock()
+	hash := channelAccessHashes[rawChanID]
+	accessHashMu.RUnlock()
+	if hash == 0 {
+		hash = telegram.GetChannelAccessHash(rawChanID)
+	}
+	return &tg.InputPeerChannel{ChannelID: rawChanID, AccessHash: hash}
+}
+
 func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m *tg.Message, senderID, chatID int64) bool {
 	// Case 1: Document media
 	if docMedia, ok := m.Media.(*tg.MessageMediaDocument); ok {
@@ -1209,9 +1231,10 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 			}
 
 			// 1B. Custom Thumbnail document
-			if strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") {
+			isImageDoc := strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") || strings.HasSuffix(lowerName, ".webp") || strings.HasPrefix(doc.MimeType, "image/")
+			if isImageDoc {
 				caption := strings.ToLower(strings.TrimSpace(m.Message))
-				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
+				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb") || strings.HasPrefix(caption, "/t") || strings.HasPrefix(caption, "/thumb")
 				sess, isPending := ext.GetPendingThumbSession(senderID, chatID)
 				if isThumbCmd || (isPending && sess != nil && !strings.HasPrefix(caption, "/")) {
 					ext.ClearPendingThumbSession(senderID)
@@ -1226,17 +1249,18 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 							u.CustomThumb = destThumb
 							_ = ext.DB.SaveUser(u)
 
-							inMsgID := m.ID
-							go func() {
-								delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-								defer cancel()
-								_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
-							}()
+							// Always send immediate confirmation to user in current chat
+							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
 
+							// Refresh interactive /us settings menu if prompt was active
 							if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
-								b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
-							} else {
-								_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+								settingsPeer := peer
+								if sess.ChatID != 0 && sess.ChatID != chatID {
+									if p := b.getPeerForChatID(sess.ChatID); p != nil {
+										settingsPeer = p
+									}
+								}
+								b.settingsUpdateHandler(ctx, settingsPeer, sess.PromptMsgID, u, "thumb")
 							}
 							return true
 						}
@@ -1270,10 +1294,10 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 		}
 	}
 
-	// Case 2: Photo media (Custom thumbnail for user only if requested)
+	// Case 2: Photo media (Custom thumbnail for user)
 	if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 		caption := strings.ToLower(strings.TrimSpace(m.Message))
-		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
+		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb") || strings.HasPrefix(caption, "/t") || strings.HasPrefix(caption, "/thumb")
 		sess, isPending := ext.GetPendingThumbSession(senderID, chatID)
 		if isThumbCmd || (isPending && sess != nil && !strings.HasPrefix(caption, "/")) {
 			ext.ClearPendingThumbSession(senderID)
@@ -1298,17 +1322,18 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 						u.CustomThumb = destThumb
 						_ = ext.DB.SaveUser(u)
 
-						inMsgID := m.ID
-						go func() {
-							delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-							defer cancel()
-							_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
-						}()
+						// Always send immediate confirmation to user in current chat
+						_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
 
+						// Refresh interactive /us settings menu if prompt was active
 						if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
-							b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
-						} else {
-							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+							settingsPeer := peer
+							if sess.ChatID != 0 && sess.ChatID != chatID {
+								if p := b.getPeerForChatID(sess.ChatID); p != nil {
+									settingsPeer = p
+								}
+							}
+							b.settingsUpdateHandler(ctx, settingsPeer, sess.PromptMsgID, u, "thumb")
 						}
 						return true
 					}

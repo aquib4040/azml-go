@@ -581,17 +581,18 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 		}
 	}
 
-	details, err := ProbeMedia(filePath)
-	if err != nil || details.Duration == 0 {
-		return ""
+	details, _ := ProbeMedia(filePath)
+	captureSec := 3
+	if details != nil && details.Duration > 4 {
+		captureSec = details.Duration / 4
+		if captureSec > 120 {
+			captureSec = 120
+		}
 	}
 
 	outThumb := filepath.Join(os.TempDir(), fmt.Sprintf("thumb_%s.jpg", RandomHex(4)))
-	captureSec := details.Duration / 4
-	if captureSec <= 0 {
-		captureSec = 1
-	}
 
+	// Primary attempt: fast input seeking
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-ss", strconv.Itoa(captureSec),
@@ -602,7 +603,25 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 		outThumb, "-y",
 	)
 	if cmd.Run() == nil {
-		return outThumb
+		if fi, sErr := os.Stat(outThumb); sErr == nil && fi.Size() > 0 {
+			return outThumb
+		}
+	}
+
+	// Fallback attempt: accurate output seeking at 2s
+	cmdFallback := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-ss", "00:00:02",
+		"-vframes", "1",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+		"-q:v", "2",
+		outThumb, "-y",
+	)
+	if cmdFallback.Run() == nil {
+		if fi, sErr := os.Stat(outThumb); sErr == nil && fi.Size() > 0 {
+			return outThumb
+		}
 	}
 	return ""
 }
@@ -614,16 +633,16 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 		}
 	}
 
-	details, err := ProbeMedia(filePath)
-	if err != nil || details.Duration == 0 {
-		return ""
+	details, _ := ProbeMedia(filePath)
+	captureSec := 3
+	if details != nil && details.Duration > 4 {
+		captureSec = details.Duration / 4
+		if captureSec > 120 {
+			captureSec = 120
+		}
 	}
 
 	outCover := filepath.Join(os.TempDir(), fmt.Sprintf("cover_hd_%s.jpg", RandomHex(4)))
-	captureSec := details.Duration / 4
-	if captureSec <= 0 {
-		captureSec = 1
-	}
 
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
@@ -634,7 +653,23 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 		outCover, "-y",
 	)
 	if cmd.Run() == nil {
-		return outCover
+		if fi, sErr := os.Stat(outCover); sErr == nil && fi.Size() > 0 {
+			return outCover
+		}
+	}
+
+	cmdFallback := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-ss", "00:00:02",
+		"-vframes", "1",
+		"-q:v", "2",
+		outCover, "-y",
+	)
+	if cmdFallback.Run() == nil {
+		if fi, sErr := os.Stat(outCover); sErr == nil && fi.Size() > 0 {
+			return outCover
+		}
 	}
 	return ""
 }

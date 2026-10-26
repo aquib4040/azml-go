@@ -143,7 +143,11 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 
 				nID, _ := m.sender.SendMessage(context.Background(), peer, fmt.Sprintf("<i>Initiating Leech:</i> <code>%s</code>", truncateString(bLink, 40)), msg.MessageID, nil)
 				if nID > 0 && m.statusMod != nil {
-					m.statusMod.SetStatusMessage(msg.ChatID, nID, peer)
+					if !m.statusMod.HasStatusMessage(msg.ChatID) {
+						m.statusMod.SetStatusMessage(msg.ChatID, nID, peer)
+					} else {
+						m.sender.AutoDeleteMessage(peer, nID, 4)
+					}
 				}
 				m.processLeechPipeline(peer, msg, opt, bLink, subTaskDir, nID)
 				time.Sleep(2 * time.Second)
@@ -252,7 +256,11 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Initiating Leech Task")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
-		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		if !m.statusMod.HasStatusMessage(msg.ChatID) {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		} else {
+			m.sender.AutoDeleteMessage(peer, notifyID, 4)
+		}
 	}
 
 	go m.processLeechPipeline(peer, msg, opt, link, taskDir, notifyID)
@@ -274,7 +282,13 @@ func (m *LeechModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCl
 		tag, telegram.EscapeHTML(errStr), mode, elapsed)
 
 	if notifyID > 0 {
-		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		statusMsgID := 0
+		if m.statusMod != nil {
+			statusMsgID = m.statusMod.GetStatusMessageID(msg.ChatID)
+		}
+		if notifyID != statusMsgID || m.taskMgr.Count() <= 1 {
+			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		}
 	}
 	_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
 
@@ -356,11 +370,13 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 
 	// Instantly render the status progress bar so the user gets an immediate (<1s) response
 	if notifyID > 0 {
-		if m.statusMod != nil {
+		if m.statusMod != nil && !m.statusMod.HasStatusMessage(msg.ChatID) {
 			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+			text, btn := m.taskMgr.BuildStatusMessage(1)
+			_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
+		} else if m.statusMod != nil {
+			go m.statusMod.UpdateAllMessages(ctx, true)
 		}
-		text, btn := m.taskMgr.BuildStatusMessage(1)
-		_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
 	}
 
 	// For HTTP/HTTPS links: probe remote headers to resolve true filename (Content-Disposition) & extension in background
@@ -926,12 +942,21 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		}
 	}
 
-	displayName = filepath.Base(downloadedPath)
-	uTask.SetName(displayName)
-	if fi, err := os.Stat(downloadedPath); err == nil && !fi.IsDir() {
+	fi, statErr := os.Stat(downloadedPath)
+	if statErr != nil {
+		m.sendDownloadError(ctx, peer, msg, notifyID, fmt.Sprintf("Downloaded file not found on disk: %v", statErr), modeStr, taskStartTime)
+		return
+	}
+	if !fi.IsDir() {
+		if fi.Size() == 0 {
+			m.sendDownloadError(ctx, peer, msg, notifyID, "Downloaded file is empty (0 bytes)", modeStr, taskStartTime)
+			return
+		}
 		uTask.SetSize(fi.Size())
 		uTask.SetProgress(fi.Size(), fi.Size(), 0, "-")
 	}
+	displayName = filepath.Base(downloadedPath)
+	uTask.SetName(displayName)
 
 	// 2. Post-processing: Forceful Archive Extraction (/leech -e, -extract, -uz, -p)
 	// Reads binary magic bytes (PK, 7z, Rar!, etc.) even if the file extension was disguised or missed

@@ -6,10 +6,12 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -134,15 +136,49 @@ type UploadOptions struct {
 	OnProgress UploadProgressFunc
 }
 
+func isTransientUploadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	transientSubstrings := []string{
+		"connection", "reset", "timeout", "deadline", "canceled",
+		"engine was closed", "engine forcibly closed", "broken pipe",
+		"write tcp", "read tcp", "eof", "wsarecv", "wsasend",
+		"forcibly closed", "internal", "worker_busy", "rpc_call_fail",
+		"msg_wait_failed", "transport is closing", "network is unreachable",
+		"temporary failure", "handshake", "flood_wait", "i/o timeout",
+		"broken network", "pipe", "host is down",
+	}
+	for _, sub := range transientSubstrings {
+		if strings.Contains(errStr, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte) error {
-	for attempt := 0; attempt < 10; attempt++ {
+	const maxAttempts = 25
+	attempt := 0
+	floodWaitAttempts := 0
+	backoff := 1500 * time.Millisecond
+
+	for attempt < maxAttempts {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		partCtx, partCancel := context.WithTimeout(ctx, 45*time.Second)
+		partCtx, partCancel := context.WithTimeout(ctx, 90*time.Second)
 		_, err := client.UploadSaveBigFilePart(partCtx, &tg.UploadSaveBigFilePartRequest{
 			FileID:         fileID,
 			FilePart:       partIndex,
@@ -154,39 +190,53 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			return nil
 		}
 
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		if d, ok := tgerr.AsFloodWait(err); ok {
+			floodWaitAttempts++
+			if floodWaitAttempts > 10 {
+				return fmt.Errorf("flood wait exceeded for part %d: %w", partIndex, err)
+			}
 			waitTime := d
 			if waitTime < 1*time.Second {
 				waitTime = 1 * time.Second
 			}
+			log.Printf("[AZML-Go Uploader] FloodWait of %v on part %d/%d. Waiting...", waitTime, partIndex, totalParts)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(waitTime + time.Duration(rand.Intn(400))*time.Millisecond):
+			case <-time.After(waitTime + time.Duration(rand.Intn(500))*time.Millisecond):
 			}
 			continue
 		}
 
-		errStr := err.Error()
-		if strings.Contains(errStr, "connection") || strings.Contains(errStr, "reset") ||
-			strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") ||
-			strings.Contains(errStr, "canceled") || strings.Contains(errStr, "engine was closed") ||
-			strings.Contains(errStr, "engine forcibly closed") || strings.Contains(errStr, "broken pipe") ||
-			strings.Contains(errStr, "write tcp") || strings.Contains(errStr, "read tcp") {
-			if attempt > 3 {
-				log.Printf("[AZML-Go Uploader] Warning: part %d (attempt %d/10) transient error: %s. Retrying...", partIndex, attempt+1, errStr)
+		attempt++
+
+		if isTransientUploadError(err) {
+			jitter := time.Duration(rand.Intn(500)) * time.Millisecond
+			sleepDuration := backoff + jitter
+			if attempt > 2 {
+				log.Printf("[AZML-Go Uploader] Warning: part %d/%d (attempt %d/%d) transient error: %v. Retrying in %v...",
+					partIndex, totalParts, attempt, maxAttempts, err, sleepDuration.Round(time.Millisecond))
 			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(1*time.Second + time.Duration(rand.Intn(300))*time.Millisecond):
+			case <-time.After(sleepDuration):
+			}
+			backoff = time.Duration(float64(backoff) * 1.5)
+			if backoff > 12*time.Second {
+				backoff = 12 * time.Second
 			}
 			continue
 		}
 
+		log.Printf("[AZML-Go Uploader] Fatal error uploading part %d: %v", partIndex, err)
 		return err
 	}
-	return fmt.Errorf("exceeded max retries (10) for part %d", partIndex)
+	return fmt.Errorf("exceeded max retries (%d) for part %d", maxAttempts, partIndex)
 }
 
 func (u *TelegramUploader) uploadVideoCover(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, coverPath string) (tg.InputPhotoClass, error) {
@@ -414,14 +464,17 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var errOnce sync.Once
 		var firstErr error
 
-		numWorkers := 16
+		numWorkers := 6
 		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
 			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 				numWorkers = val
 			}
 		}
-		if numWorkers > 24 {
-			numWorkers = 24
+		if numWorkers > 10 {
+			numWorkers = 10
+		}
+		if numWorkers < 2 {
+			numWorkers = 2
 		}
 		if int(totalParts) < numWorkers {
 			numWorkers = int(totalParts)
@@ -480,7 +533,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 	var attributes []tg.DocumentAttributeClass
 	extName := strings.ToLower(filepath.Ext(opt.FilePath))
-	isVideo := isVideoExt(extName) && !opt.AsDoc
+	isVideo := isVideoExt(extName)
 	isAudio := isAudioExt(extName) && !opt.AsDoc
 
 	var thumbFile tg.InputFileClass
@@ -518,15 +571,21 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		mimeType = "video/mp4"
 		if extName == ".mkv" {
 			mimeType = "video/x-matroska"
+		} else if extName == ".webm" {
+			mimeType = "video/webm"
 		}
 		details, _ := ext.ProbeMedia(opt.FilePath)
 		dur := 0
-		w := 0
-		h := 0
+		w := 1280
+		h := 720
 		if details != nil {
-			dur = details.Duration
-			w = details.Width
-			h = details.Height
+			if details.Duration > 0 {
+				dur = details.Duration
+			}
+			if details.Width > 0 && details.Height > 0 {
+				w = details.Width
+				h = details.Height
+			}
 		}
 		attributes = append(attributes, &tg.DocumentAttributeVideo{
 			SupportsStreaming: true,
@@ -691,6 +750,28 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 
 		sentChats := make(map[int64]bool)
 		sentChats[actualDestChatID] = true
+
+		// 0. Send to User Personal Dump channel (if user explicitly configured /setdump or -dump)
+		if opt.DumpChatID != 0 && actualDestChatID != opt.DumpChatID && !sentChats[opt.DumpChatID] {
+			sentChats[opt.DumpChatID] = true
+			if !copyMessageViaBotAPI(botToken, opt.DumpChatID, actualDestChatID, msgID) {
+				chID := getChannelID(opt.DumpChatID)
+				dumpPeer := &tg.InputPeerChannel{
+					ChannelID:  chID,
+					AccessHash: telegram.GetChannelAccessHash(chID),
+				}
+				_, dErr := u.botClient.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+					FromPeer:   uploadPeer,
+					ToPeer:     dumpPeer,
+					ID:         []int{msgID},
+					RandomID:   []int64{time.Now().UnixNano() + 1},
+					DropAuthor: true,
+				})
+				if dErr != nil {
+					log.Printf("[AZML-Go Uploader] Forward to user personal dump failed: %v", dErr)
+				}
+			}
+		}
 
 		// 1. Send to User PM - ensure user gets the file in PM cleanly via Main Bot
 		if opt.UserID != 0 && actualDestChatID != opt.UserID && !sentChats[opt.UserID] {

@@ -83,17 +83,19 @@ func (bot *BotSession) SafeSuffix() string {
 
 func (bot *BotSession) LockChunk() {
 	bot.chunkMu.Lock()
-	// Anti-FloodWait Pacing: Telegram DC throttles if MTProto requests arrive faster than ~120ms on a single session.
+	// Anti-FloodWait Pacing: 60ms pacing provides safe throughput (~16 MB/s per session) without triggering DC FloodWait.
+	// We pace only the request dispatch and release chunkMu immediately so network I/O streams in parallel.
 	if !bot.lastReqTime.IsZero() {
-		if elapsed := time.Since(bot.lastReqTime); elapsed < 120*time.Millisecond {
-			time.Sleep(120*time.Millisecond - elapsed)
+		if elapsed := time.Since(bot.lastReqTime); elapsed < 60*time.Millisecond {
+			time.Sleep(60*time.Millisecond - elapsed)
 		}
 	}
+	bot.lastReqTime = time.Now()
+	bot.chunkMu.Unlock()
 }
 
 func (bot *BotSession) UnlockChunk() {
-	bot.lastReqTime = time.Now()
-	bot.chunkMu.Unlock()
+	// Mutex is already unlocked in LockChunk to permit concurrent MTProto chunk streaming
 }
 
 func (bot *BotSession) StartDownload() {

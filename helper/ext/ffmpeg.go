@@ -18,7 +18,27 @@ type StreamInfo struct {
 	CodecName string            `json:"codec_name"`
 	Width     int               `json:"width"`
 	Height    int               `json:"height"`
+	Duration  string            `json:"duration"`
 	Tags      map[string]string `json:"tags"`
+}
+
+func parseDurationString(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "N/A" {
+		return 0
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 {
+		return int(f)
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) == 3 {
+		h, _ := strconv.Atoi(parts[0])
+		m, _ := strconv.Atoi(parts[1])
+		secParts := strings.Split(parts[2], ".")
+		sec, _ := strconv.Atoi(secParts[0])
+		return h*3600 + m*60 + sec
+	}
+	return 0
 }
 
 type FormatInfo struct {
@@ -68,9 +88,7 @@ func ProbeMedia(filePath string) (*MediaDetails, error) {
 	}
 
 	details := &MediaDetails{}
-	if dur, err := strconv.ParseFloat(output.Format.Duration, 64); err == nil {
-		details.Duration = int(dur)
-	}
+	details.Duration = parseDurationString(output.Format.Duration)
 
 	details.Title = output.Format.Tags["title"]
 	details.Artist = output.Format.Tags["artist"]
@@ -78,6 +96,15 @@ func ProbeMedia(filePath string) (*MediaDetails, error) {
 	for _, s := range output.Streams {
 		switch s.CodecType {
 		case "video":
+			if details.Duration == 0 {
+				if d := parseDurationString(s.Duration); d > 0 {
+					details.Duration = d
+				} else if d := parseDurationString(s.Tags["DURATION"]); d > 0 {
+					details.Duration = d
+				} else if d := parseDurationString(s.Tags["DURATION-eng"]); d > 0 {
+					details.Duration = d
+				}
+			}
 			if details.Width == 0 {
 				details.Width = s.Width
 				details.Height = s.Height

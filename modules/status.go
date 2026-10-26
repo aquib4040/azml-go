@@ -29,6 +29,7 @@ type StatusModule struct {
 	taskMgr       *ext.TaskManager
 	statusReplies map[int64]*StatusReplyInfo
 	chatPages     map[int64]int
+	chatPeers     map[int64]tg.InputPeerClass
 	mu            sync.RWMutex
 	stopTicker    chan struct{}
 }
@@ -39,6 +40,7 @@ func NewStatusModule(sender *telegram.MessageSender) *StatusModule {
 		taskMgr:       ext.GetTaskManager(),
 		statusReplies: make(map[int64]*StatusReplyInfo),
 		chatPages:     make(map[int64]int),
+		chatPeers:     make(map[int64]tg.InputPeerClass),
 		stopTicker:    make(chan struct{}),
 	}
 	mod.startPeriodicUpdateLoop()
@@ -124,7 +126,24 @@ func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass,
 		LastEdit:    time.Now(),
 	}
 	m.chatPages[msg.ChatID] = page
+	m.chatPeers[msg.ChatID] = peer
 	m.mu.Unlock()
+}
+
+func (m *StatusModule) HasStatusMessage(chatID int64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	info, ok := m.statusReplies[chatID]
+	return ok && info != nil && info.MessageID > 0
+}
+
+func (m *StatusModule) GetStatusMessageID(chatID int64) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if info, ok := m.statusReplies[chatID]; ok && info != nil {
+		return info.MessageID
+	}
+	return 0
 }
 
 func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPeerClass) {
@@ -132,6 +151,7 @@ func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPe
 		return
 	}
 	m.mu.Lock()
+	m.chatPeers[chatID] = peer
 	// Never show 2 task/status messages at once! Delete old message if exists
 	if old, exists := m.statusReplies[chatID]; exists && old != nil && old.MessageID > 0 && old.MessageID != msgID {
 		go func(p tg.InputPeerClass, id int) {
@@ -181,7 +201,7 @@ func (m *StatusModule) DeleteAllMessages(ctx context.Context) {
 	}
 }
 
-func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string) {
+func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64) {
 	parts := strings.Fields(data)
 	if len(parts) < 2 {
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
@@ -205,6 +225,10 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 			gid := parts[2]
 			task := m.taskMgr.GetTask(gid)
 			if task != nil {
+				if fromUID != 0 && task.UserID() != 0 && task.UserID() != fromUID && !telegram.IsOwner(fromUID) {
+					_ = m.sender.AnswerCallback(ctx, queryID, "⚠️ It's not your task to cancel!", true)
+					return
+				}
 				_ = task.Cancel()
 				m.taskMgr.RemoveTask(gid)
 				_ = m.sender.AnswerCallback(ctx, queryID, "× Task Cancelled!", false)
@@ -323,6 +347,40 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		return
 	}
 
+	// Auto-heal: If tasks are actively running in a chat, but no status message is currently tracked,
+	// automatically recreate the status message using the known peer for that chat.
+	activeChatTasks := make(map[int64]bool)
+	for _, t := range m.taskMgr.GetAllTasks() {
+		if cID := t.ChatID(); cID != 0 {
+			activeChatTasks[cID] = true
+		}
+	}
+
+	for cID := range activeChatTasks {
+		m.mu.RLock()
+		info, hasStatus := m.statusReplies[cID]
+		peer, hasPeer := m.chatPeers[cID]
+		m.mu.RUnlock()
+
+		if (!hasStatus || info == nil || info.MessageID <= 0) && hasPeer && peer != nil {
+			page := m.getChatPage(cID)
+			text, btn := m.taskMgr.BuildStatusMessage(page)
+			sentID, err := m.sender.SendMessageWithButtons(ctx, peer, text, 0, btn, 3)
+			if err == nil && sentID > 0 {
+				m.mu.Lock()
+				m.statusReplies[cID] = &StatusReplyInfo{
+					ChatID:      cID,
+					MessageID:   sentID,
+					Peer:        peer,
+					CurrentPage: page,
+					LastEdit:    time.Now(),
+					CreatedAt:   time.Now(),
+				}
+				m.mu.Unlock()
+			}
+		}
+	}
+
 	m.mu.Lock()
 	if len(m.statusReplies) == 0 {
 		m.mu.Unlock()
@@ -359,7 +417,21 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		text, btn := m.taskMgr.BuildStatusMessage(targetPage)
 		err := m.sender.EditMessageWithButtons(ctx, r.Peer, r.MessageID, text, btn, 3)
 		if err != nil {
-			if strings.Contains(err.Error(), "MESSAGE_ID_INVALID") || strings.Contains(err.Error(), "400") {
+			errStr := strings.ToUpper(err.Error())
+			// MESSAGE_NOT_MODIFIED is normal Telegram behavior when text hasn't changed.
+			// NEVER delete active status tracking on MESSAGE_NOT_MODIFIED!
+			if strings.Contains(errStr, "MESSAGE_NOT_MODIFIED") {
+				m.mu.Lock()
+				r.LastEdit = time.Now()
+				m.mu.Unlock()
+				continue
+			}
+			// Only drop tracking if the message or peer was actually deleted/invalid
+			if strings.Contains(errStr, "MESSAGE_ID_INVALID") ||
+				strings.Contains(errStr, "MESSAGE_EMPTY") ||
+				strings.Contains(errStr, "CHAT_ADMIN_REQUIRED") ||
+				strings.Contains(errStr, "PEER_ID_INVALID") ||
+				strings.Contains(errStr, "MESSAGE_DELETE_FORBIDDEN") {
 				m.mu.Lock()
 				delete(m.statusReplies, r.ChatID)
 				m.mu.Unlock()

@@ -292,3 +292,31 @@ func TestDetectExtension(t *testing.T) {
 		t.Errorf("DetectExtension(zipFile) = %q; want .zip", ext)
 	}
 }
+
+func TestParseDurationString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected int
+	}{
+		{"empty string", "", 0},
+		{"N/A string", "N/A", 0},
+		{"invalid string", "invalid_time", 0},
+		{"seconds float", "125.500000", 125},
+		{"seconds integer", "3600", 3600},
+		{"HH:MM:SS format", "01:02:03", 3723},
+		{"HH:MM:SS with millis", "00:23:45.500", 1425},
+		{"MM:SS format", "05:30", 330},
+		{"long video timestamp", "02:15:30.250", 8130},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseDurationString(tt.input)
+			if got != tt.expected {
+				t.Errorf("parseDurationString(%q) = %d; want %d", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+

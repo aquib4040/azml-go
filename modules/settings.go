@@ -35,13 +35,17 @@ func (m *SettingsModule) HandleSettings(ctx context.Context, peer tg.InputPeerCl
 	u := m.userMap.GetOrCreate(msg.UserID)
 	parts := strings.Fields(msg.Text)
 
-	// Check if this was a thumbnail command (/setthumb or /us thumb)
+	// Check if this was a thumbnail command (/setthumb, /t, /thumb, or /us thumb)
 	isThumbCmd := false
-	if len(parts) >= 1 && strings.Contains(strings.ToLower(parts[0]), "setthumb") {
-		isThumbCmd = true
-	} else if len(parts) >= 2 {
+	if len(parts) >= 1 {
+		cmd := strings.ToLower(parts[0])
+		if strings.Contains(cmd, "setthumb") || strings.Contains(cmd, "thumb") || cmd == "/t" || strings.HasPrefix(cmd, "/t@") {
+			isThumbCmd = true
+		}
+	}
+	if len(parts) >= 2 {
 		subCmd := strings.ToLower(parts[1])
-		if subCmd == "thumb" || subCmd == "setthumb" {
+		if subCmd == "thumb" || subCmd == "setthumb" || subCmd == "t" {
 			isThumbCmd = true
 		}
 	}
@@ -786,13 +790,21 @@ func (m *SettingsModule) buildMetadataMenu(u *types.UserSettings) (string, *tele
 
 func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUserID int64) {
 	parts := strings.Fields(data)
+	if len(parts) >= 2 {
+		targetUID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err == nil && targetUID != fromUserID {
+			_ = m.sender.AnswerCallback(ctx, queryID, "⚠️ It's not your settings panel! Use /us to open your own.", true)
+			return
+		}
+	}
 	if len(parts) < 3 {
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 		return
 	}
 
 	targetUID, _ := strconv.ParseInt(parts[1], 10, 64)
-	if targetUID != fromUserID && !telegram.IsOwner(fromUserID) {
-		_ = m.sender.AnswerCallback(ctx, queryID, "This menu is not for you!", true)
+	if targetUID != fromUserID {
+		_ = m.sender.AnswerCallback(ctx, queryID, "⚠️ It's not your settings panel! Use /us to open your own.", true)
 		return
 	}
 
@@ -802,13 +814,13 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 	switch action {
 	// 1. Navigation
 	case "main", "back":
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 		text, btn := m.buildMainMenu(u, "")
 		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 1)
-		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 	case "leech":
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 		text, btn := m.buildLeechMenu(u, "")
 		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
-		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 	case "reset_all":
 		u.Prefix = ""
 		u.Suffix = ""
@@ -825,49 +837,49 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 			_ = os.Remove(u.CustomThumb)
 			u.CustomThumb = ""
 		}
-		_ = ext.DB.SaveUser(u)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
+		_ = m.sender.AnswerCallback(ctx, queryID, "All user settings reset to default!", true)
 		text, btn := m.buildMainMenu(u, "")
 		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 1)
-		_ = m.sender.AnswerCallback(ctx, queryID, "All user settings reset to default!", true)
 	case "close":
 		ext.ClearPendingSettingSession(targetUID)
 		ext.ClearPendingThumbSession(targetUID)
-		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 		_ = m.sender.AnswerCallback(ctx, queryID, "Settings closed", false)
+		_ = m.sender.DeleteMessage(ctx, peer, []int{msgID})
 
 	// 2. Direct Toggles (Edit message in-place without glitch)
 	case "doc":
 		u.AsDoc = !u.AsDoc
-		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildLeechMenu(u, "")
-		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
 		st := "MEDIA"
 		if u.AsDoc {
 			st = "DOCUMENT"
 		}
 		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Upload Type set to %s", st), false)
+		text, btn := m.buildLeechMenu(u, "")
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 
 	case "autorename":
 		u.Autorename = !u.Autorename
-		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildLeechMenu(u, "")
-		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
 		st := "Disabled"
 		if u.Autorename {
 			st = "Enabled"
 		}
 		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("AutoRename is now %s", st), false)
+		text, btn := m.buildLeechMenu(u, "")
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 
 	case "auto_thumb":
 		u.AutoThumb = !u.AutoThumb
-		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildLeechMenu(u, "")
-		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
 		st := "Disabled"
 		if u.AutoThumb {
 			st = "Enabled"
 		}
 		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Auto Thumbnail is now %s", st), false)
+		text, btn := m.buildLeechMenu(u, "")
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 
 	case "rename_method":
 		if u.RenameMethod == "auto" {
@@ -875,32 +887,32 @@ func (m *SettingsModule) HandleCallback(ctx context.Context, peer tg.InputPeerCl
 		} else {
 			u.RenameMethod = "auto"
 		}
-		_ = ext.DB.SaveUser(u)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
+		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Method: %s", strings.Title(u.RenameMethod)), false)
 		text, btn := m.buildLeechMenu(u, "")
 		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
-		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Method: %s", strings.Title(u.RenameMethod)), false)
 
 	case "esplits":
 		u.EqualSplits = !u.EqualSplits
-		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildSplitSizeMenu(u)
-		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
 		st := "Disabled"
 		if u.EqualSplits {
 			st = "Enabled"
 		}
 		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Equal Splits is now %s", st), false)
+		text, btn := m.buildSplitSizeMenu(u)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 
 	case "mgroup":
 		u.MediaGroup = !u.MediaGroup
-		_ = ext.DB.SaveUser(u)
-		text, btn := m.buildSplitSizeMenu(u)
-		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		go func(usr *types.UserSettings) { _ = ext.DB.SaveUser(usr) }(u)
 		st := "Disabled"
 		if u.MediaGroup {
 			st = "Enabled"
 		}
 		_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("Media Group is now %s", st), false)
+		text, btn := m.buildSplitSizeMenu(u)
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 
 	// 3. Thumbnail Submenu
 	case "thumb":

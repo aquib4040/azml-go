@@ -87,7 +87,11 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Fetching Media Info with yt-dlp")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
-		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		if !m.statusMod.HasStatusMessage(msg.ChatID) {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		} else {
+			m.sender.AutoDeleteMessage(peer, notifyID, 4)
+		}
 	}
 
 	go m.processYtdl(peer, msg, link, customQuality, taskDir, notifyID)
@@ -109,7 +113,13 @@ func (m *YtdlModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCla
 		tag, telegram.EscapeHTML(errStr), mode, elapsed)
 
 	if notifyID > 0 {
-		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		statusMsgID := 0
+		if m.statusMod != nil {
+			statusMsgID = m.statusMod.GetStatusMessageID(msg.ChatID)
+		}
+		if notifyID != statusMsgID || m.taskMgr.Count() <= 1 {
+			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		}
 	}
 	_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
 
@@ -194,12 +204,14 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		downloadedFile = renamedPath
 	}
 
-	var totalSize int64
-	if fi, sErr := os.Stat(downloadedFile); sErr == nil {
-		totalSize = fi.Size()
-		uTask.SetName(finalName)
-		uTask.SetSize(totalSize)
+	fi, sErr := os.Stat(downloadedFile)
+	if sErr != nil || fi.Size() == 0 {
+		m.sendDownloadError(ctx, peer, msg, notifyID, "Downloaded file is missing or empty (0 bytes)", "#Leech | #YtDlp", taskStartTime)
+		return
 	}
+	totalSize := fi.Size()
+	uTask.SetName(finalName)
+	uTask.SetSize(totalSize)
 	uTask.SetStatus(types.StatusUploading, "Gotd Uploader")
 
 	customThumb := ""

@@ -147,6 +147,10 @@ func InitCommands() {
 			"usersettings" + suffix,
 			"setthumb" + suffix,
 			"setthumb",
+			"t" + suffix,
+			"t",
+			"thumb" + suffix,
+			"thumb",
 		},
 		BotSetting: []string{
 			"bsetting" + suffix,
