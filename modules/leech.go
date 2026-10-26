@@ -141,9 +141,14 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 					_ = os.MkdirAll(subTaskDir, 0777)
 				}
 
+				isFirstBulk := false
+				if m.statusMod != nil {
+					isFirstBulk = m.statusMod.ReserveStatusSlot(msg.ChatID)
+				}
+
 				nID, _ := m.sender.SendMessage(context.Background(), peer, fmt.Sprintf("<i>Initiating Leech:</i> <code>%s</code>", truncateString(bLink, 40)), msg.MessageID, nil)
 				if nID > 0 && m.statusMod != nil {
-					if !m.statusMod.HasStatusMessage(msg.ChatID) {
+					if isFirstBulk {
 						m.statusMod.SetStatusMessage(msg.ChatID, nID, peer)
 					} else {
 						m.sender.AutoDeleteMessage(peer, nID, 4)
@@ -254,9 +259,14 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		_ = os.MkdirAll(taskDir, 0777)
 	}
 
+	isFirstStatus := false
+	if m.statusMod != nil {
+		isFirstStatus = m.statusMod.ReserveStatusSlot(msg.ChatID)
+	}
+
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Initiating Leech Task")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
-		if !m.statusMod.HasStatusMessage(msg.ChatID) {
+		if isFirstStatus {
 			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
 		} else {
 			m.sender.AutoDeleteMessage(peer, notifyID, 4)
@@ -369,12 +379,12 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	m.taskMgr.AddTask(uTask)
 
 	// Instantly render the status progress bar so the user gets an immediate (<1s) response
-	if notifyID > 0 {
-		if m.statusMod != nil && !m.statusMod.HasStatusMessage(msg.ChatID) {
+	if notifyID > 0 && m.statusMod != nil {
+		if !m.statusMod.HasStatusMessage(msg.ChatID) {
 			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
 			text, btn := m.taskMgr.BuildStatusMessage(1)
 			_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
-		} else if m.statusMod != nil {
+		} else {
 			go m.statusMod.UpdateAllMessages(ctx, true)
 		}
 	}

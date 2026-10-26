@@ -431,9 +431,10 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 		if err == nil {
 			return nil
 		}
-		if err != nil {
-			log.Printf("[AZML-Go Bot API] EditMessage failed: %v, falling back to MTProto", err)
+		if strings.Contains(strings.ToLower(err.Error()), "message to edit not found") {
+			return err
 		}
+		log.Printf("[AZML-Go Bot API] EditMessage failed: %v, falling back to MTProto", err)
 	}
 
 	return m.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(cols))

@@ -487,10 +487,23 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				msgCtx.RawMedia = header.ReplyMedia
 			}
 
-			// 2. Fetch replied message directly from this chat with a fast 1.2s timeout if media not already present
+			// 2. Fetch replied message directly from this chat with generous timeout (8s) so concurrent tasks never miss media
 			if msgCtx.RawMedia == nil {
-				fetchCtx, fetchCancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-				if repliedMsg, err := telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, 8*time.Second)
+				var repliedMsg *tg.Message
+				for attempt := 0; attempt < 3; attempt++ {
+					var err error
+					repliedMsg, err = telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID)
+					if err == nil && repliedMsg != nil {
+						break
+					}
+					select {
+					case <-fetchCtx.Done():
+						break
+					case <-time.After(250 * time.Millisecond):
+					}
+				}
+				if repliedMsg != nil {
 					msgCtx.ReplyText = repliedMsg.Message
 					if repliedMsg.Media != nil {
 						msgCtx.HasMedia = true
