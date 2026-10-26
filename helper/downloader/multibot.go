@@ -389,20 +389,27 @@ func (m *MultiBotDownloader) fetchChunkWithBot(
 		Limit:        limit,
 	})
 
-	// Inline FloodWait retry for minor <= 2s wait (avoids hopping sessions unnecessarily)
+	// If this bot hits FloodWait:
 	if err != nil {
 		if d, ok := tgerr.AsFloodWait(err); ok {
-			waitSec := int(d.Seconds())
-			if waitSec <= 2 {
-				time.Sleep(d + 80*time.Millisecond)
-				res, err = bot.API.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-					Precise:      false,
-					CDNSupported: false,
-					Location:     location,
-					Offset:       offset,
-					Limit:        limit,
-				})
+			waitSec := int64(d.Seconds())
+			if waitSec < 2 {
+				waitSec = 2
 			}
+			bot.SetCooldown(waitSec + 2)
+			// If multi-bot pool has multiple active sessions, do not stall this download worker with a sleep.
+			// Return immediately so fetchChunkWithRetry can instantly grab an idle bot from the pool.
+			if m.pool != nil && m.pool.ActiveSessionCount() > 1 {
+				return nil, err
+			}
+			time.Sleep(d + 80*time.Millisecond)
+			res, err = bot.API.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+				Precise:      false,
+				CDNSupported: false,
+				Location:     location,
+				Offset:       offset,
+				Limit:        limit,
+			})
 		}
 	}
 

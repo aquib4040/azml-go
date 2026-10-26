@@ -161,6 +161,7 @@ type SessionPool struct {
 	baseDataPath  string
 	dumpChatID    int64
 	rrIndex       int
+	uploadRRIndex int
 }
 
 func (p *SessionPool) SetDumpChatID(id int64) {
@@ -459,6 +460,7 @@ func (bot *BotSession) ReleaseUpload() {
 		if count := bot.ActiveUploads.Add(-1); count < 0 {
 			bot.ActiveUploads.Store(0)
 		}
+		bot.Touch()
 	}
 }
 
@@ -888,44 +890,90 @@ func (p *SessionPool) GetNextAvailable(tokens []string, apiID int, apiHash strin
 }
 
 // FindBotForChat checks if any worker bot is a member/admin with posting rights in the specified group/channel,
-// and returns the least-busy bot session.
+// and returns the best bot session using fair round-robin load balancing among least-busy, non-cooling bots.
 func (p *SessionPool) FindBotForChat(ctx context.Context, chatID int64) *BotSession {
 	if chatID >= 0 {
 		return nil // User PMs are private to the bot the user started
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	allSessions := make([]*BotSession, len(p.sessions))
+	copy(allSessions, p.sessions)
+	p.mu.RUnlock()
 
-	var bestBot *BotSession
-	var minActive int32 = 999999
+	now := time.Now().Unix()
+	var readyBots []*BotSession
 
-	for _, bot := range p.sessions {
+	for _, bot := range allSessions {
 		if !p.IsTokenInvalid(bot.Token) {
 			select {
 			case <-bot.ready:
-				if bot.readyErr == nil && !bot.IsCooling() {
-					checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-					canPost := bot.CanPostInChannel(checkCtx, chatID)
-					cancel()
-					if canPost {
-						active := bot.ActiveUploads.Load()
-						if active < minActive {
-							minActive = active
-							bestBot = bot
-						}
-					}
+				if bot.readyErr == nil {
+					readyBots = append(readyBots, bot)
 				}
 			default:
 			}
 		}
 	}
 
-	if bestBot != nil {
-		bestBot.StartUpload()
-		return bestBot
+	if len(readyBots) == 0 {
+		return nil
 	}
-	return nil
+
+	// 1. First pass: find bots that are NOT cooling down and have confirmed posting rights
+	var eligible []*BotSession
+	for _, bot := range readyBots {
+		if now >= bot.cooling.Load() {
+			checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			canPost := bot.CanPostInChannel(checkCtx, chatID)
+			cancel()
+			if canPost {
+				eligible = append(eligible, bot)
+			}
+		}
+	}
+
+	// 2. Fallback: if all non-cooling bots cannot post or are cooling down,
+	// check cooling bots that can post as a graceful fallback
+	if len(eligible) == 0 {
+		for _, bot := range readyBots {
+			checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			canPost := bot.CanPostInChannel(checkCtx, chatID)
+			cancel()
+			if canPost {
+				eligible = append(eligible, bot)
+			}
+		}
+	}
+
+	if len(eligible) == 0 {
+		return nil
+	}
+
+	// 3. Find the minimum ActiveUploads among eligible bots
+	minActive := eligible[0].ActiveUploads.Load()
+	for _, b := range eligible[1:] {
+		if a := b.ActiveUploads.Load(); a < minActive {
+			minActive = a
+		}
+	}
+
+	var candidates []*BotSession
+	for _, b := range eligible {
+		if b.ActiveUploads.Load() == minActive {
+			candidates = append(candidates, b)
+		}
+	}
+
+	// 4. Fair Round-Robin selection among the least-loaded candidates
+	p.mu.Lock()
+	p.uploadRRIndex = (p.uploadRRIndex + 1) % len(candidates)
+	chosen := candidates[p.uploadRRIndex]
+	p.mu.Unlock()
+
+	chosen.StartUpload()
+	chosen.Touch()
+	return chosen
 }
 
 // WarmupTokens starts background authentication of multi-worker tokens with controlled concurrency

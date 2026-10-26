@@ -165,7 +165,117 @@ func isTransientUploadError(err error) bool {
 	return false
 }
 
-func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte, floodUntil *atomic.Int64) error {
+// uploadPacingState provides adaptive rate limiting (AIMD) and coordinated FloodWait backoff
+// across concurrent part uploader workers.
+type uploadPacingState struct {
+	mu            sync.Mutex
+	lastDispatch  time.Time
+	intervalNs    atomic.Int64
+	floodUntilMs  atomic.Int64
+	consecSuccess atomic.Int32
+	onFloodWait   func(waitTime time.Duration)
+}
+
+func newUploadPacingState(baseInterval time.Duration, onFloodWait func(time.Duration)) *uploadPacingState {
+	ps := &uploadPacingState{
+		onFloodWait: onFloodWait,
+	}
+	ps.intervalNs.Store(int64(baseInterval))
+	return ps
+}
+
+func (p *uploadPacingState) Pace(ctx context.Context) error {
+	for {
+		if until := p.floodUntilMs.Load(); until > 0 {
+			nowMs := time.Now().UnixMilli()
+			if until > nowMs {
+				waitRemaining := time.Duration(until-nowMs) * time.Millisecond
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(waitRemaining):
+				}
+				continue
+			}
+		}
+		break
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Re-check under lock in case another worker just hit flood
+	if until := p.floodUntilMs.Load(); until > 0 {
+		nowMs := time.Now().UnixMilli()
+		if until > nowMs {
+			waitRemaining := time.Duration(until-nowMs) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitRemaining):
+			}
+		}
+	}
+
+	interval := time.Duration(p.intervalNs.Load())
+	if interval < 60*time.Millisecond {
+		interval = 60 * time.Millisecond
+	}
+
+	if !p.lastDispatch.IsZero() {
+		if elapsed := time.Since(p.lastDispatch); elapsed < interval {
+			waitDur := interval - elapsed
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitDur):
+			}
+		}
+	}
+	p.lastDispatch = time.Now()
+	return nil
+}
+
+func (p *uploadPacingState) RecordSuccess() {
+	count := p.consecSuccess.Add(1)
+	if count >= 30 {
+		p.consecSuccess.Store(0)
+		curr := p.intervalNs.Load()
+		base := int64(80 * time.Millisecond)
+		if curr > base {
+			newVal := curr - int64(10*time.Millisecond)
+			if newVal < base {
+				newVal = base
+			}
+			p.intervalNs.Store(newVal)
+		}
+	}
+}
+
+func (p *uploadPacingState) HandleFloodWait(waitDur time.Duration, partIndex, totalParts int) {
+	if waitDur < 1*time.Second {
+		waitDur = 1 * time.Second
+	}
+	totalPause := waitDur + 800*time.Millisecond
+	p.floodUntilMs.Store(time.Now().Add(totalPause).UnixMilli())
+
+	curr := p.intervalNs.Load()
+	newInterval := curr + int64(35*time.Millisecond)
+	if newInterval > int64(260*time.Millisecond) {
+		newInterval = int64(260 * time.Millisecond)
+	}
+	p.intervalNs.Store(newInterval)
+	p.consecSuccess.Store(0)
+
+	log.Printf("[AZML-Go Uploader] FloodWait of %v on part %d/%d. Backing off pacing to %v. Pausing workers for %v...",
+		waitDur, partIndex, totalParts, time.Duration(newInterval).Round(time.Millisecond), totalPause.Round(time.Millisecond))
+
+	if p.onFloodWait != nil {
+		p.onFloodWait(waitDur)
+	}
+}
+
+func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte, pacer *uploadPacingState) error {
 	const maxAttempts = 25
 	attempt := 0
 	floodWaitAttempts := 0
@@ -178,18 +288,9 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 		default:
 		}
 
-		// Coordinated pause: if any worker hit FloodWait, pause immediately before making RPC
-		if floodUntil != nil {
-			if until := floodUntil.Load(); until > 0 {
-				nowMs := time.Now().UnixMilli()
-				if until > nowMs {
-					waitRemaining := time.Duration(until-nowMs) * time.Millisecond
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(waitRemaining):
-					}
-				}
+		if pacer != nil {
+			if err := pacer.Pace(ctx); err != nil {
+				return err
 			}
 		}
 
@@ -202,6 +303,9 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 		})
 		partCancel()
 		if err == nil {
+			if pacer != nil {
+				pacer.RecordSuccess()
+			}
 			return nil
 		}
 
@@ -214,19 +318,17 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			if floodWaitAttempts > 10 {
 				return fmt.Errorf("flood wait exceeded for part %d: %w", partIndex, err)
 			}
+			if pacer != nil {
+				pacer.HandleFloodWait(d, partIndex, totalParts)
+			}
 			waitTime := d
 			if waitTime < 1*time.Second {
 				waitTime = 1 * time.Second
 			}
-			// Coordinate with all workers on this upload to pause
-			if floodUntil != nil {
-				floodUntil.Store(time.Now().Add(waitTime + 400*time.Millisecond).UnixMilli())
-			}
-			log.Printf("[AZML-Go Uploader] FloodWait of %v on part %d/%d. Waiting...", waitTime, partIndex, totalParts)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(waitTime + time.Duration(rand.Intn(400))*time.Millisecond):
+			case <-time.After(waitTime + 800*time.Millisecond):
 			}
 			continue
 		}
@@ -489,10 +591,11 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			numWorkers = int(totalParts)
 		}
 
-		// Global upload pacing mutex: serializes the actual RPC dispatch to prevent burst FloodWait
-		var pacingMu sync.Mutex
-		var lastDispatch time.Time
-		var clientFloodUntil atomic.Int64
+		pacer := newUploadPacingState(85*time.Millisecond, func(waitDur time.Duration) {
+			if uploadBotSession != nil {
+				uploadBotSession.SetCooldown(int64(waitDur.Seconds()) + 15)
+			}
+		})
 
 		var wg sync.WaitGroup
 		for w := 0; w < numWorkers; w++ {
@@ -500,7 +603,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			go func(workerID int) {
 				defer wg.Done()
 				// Stagger worker start to spread initial burst
-				time.Sleep(time.Duration(workerID*80) * time.Millisecond)
+				time.Sleep(time.Duration(workerID*90) * time.Millisecond)
 
 				for partIndex := range tasks {
 					if firstErr != nil || ctx.Err() != nil {
@@ -519,17 +622,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 						return
 					}
 
-					// Global pacing: ensure minimum 60ms between consecutive RPC dispatches
-					pacingMu.Lock()
-					if !lastDispatch.IsZero() {
-						if elapsed := time.Since(lastDispatch); elapsed < 60*time.Millisecond {
-							time.Sleep(60*time.Millisecond - elapsed)
-						}
-					}
-					lastDispatch = time.Now()
-					pacingMu.Unlock()
-
-					saveErr := saveBigFilePartWithRetry(ctx, clientToUse, fileID, int(partIndex), int(totalParts), buf, &clientFloodUntil)
+					saveErr := saveBigFilePartWithRetry(ctx, clientToUse, fileID, int(partIndex), int(totalParts), buf, pacer)
 					if saveErr != nil {
 						errOnce.Do(func() {
 							firstErr = fmt.Errorf("UploadSaveBigFilePart failed for part %d: %w", partIndex, saveErr)
@@ -768,6 +861,9 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 				waitDur = 1 * time.Second
 			}
 			log.Printf("[AZML-Go Uploader] FloodWait %v on MessagesSendMedia (attempt %d/10), waiting...", waitDur, attempt+1)
+			if uploadBotSession != nil {
+				uploadBotSession.SetCooldown(int64(waitDur.Seconds()) + 15)
+			}
 			time.Sleep(waitDur + 500*time.Millisecond)
 			continue
 		}
