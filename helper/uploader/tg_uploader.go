@@ -170,12 +170,39 @@ func isTransientUploadError(err error) bool {
 type uploadFloodCoordinator struct {
 	floodUntilMs atomic.Int64
 	onFloodWait  func(waitTime time.Duration)
+	paceMu       sync.Mutex
+	lastPace     time.Time
 }
 
 func newUploadFloodCoordinator(onFloodWait func(time.Duration)) *uploadFloodCoordinator {
 	return &uploadFloodCoordinator{
 		onFloodWait: onFloodWait,
 	}
+}
+
+func (c *uploadFloodCoordinator) Pace(ctx context.Context, minInterval time.Duration) error {
+	if minInterval <= 0 {
+		return nil
+	}
+	c.paceMu.Lock()
+	now := time.Now()
+	var wait time.Duration
+	if !c.lastPace.IsZero() {
+		if elapsed := now.Sub(c.lastPace); elapsed < minInterval {
+			wait = minInterval - elapsed
+		}
+	}
+	c.lastPace = now.Add(wait)
+	c.paceMu.Unlock()
+
+	if wait > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil
 }
 
 func (c *uploadFloodCoordinator) WaitIfFlooded(ctx context.Context) error {
@@ -231,6 +258,9 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 
 		if floodCoord != nil {
 			if err := floodCoord.WaitIfFlooded(ctx); err != nil {
+				return err
+			}
+			if err := floodCoord.Pace(ctx, 25*time.Millisecond); err != nil {
 				return err
 			}
 		}
@@ -513,17 +543,17 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var errOnce sync.Once
 		var firstErr error
 
-		numWorkers := 8
+		numWorkers := 5
 		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
 			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
 				numWorkers = val
 			}
 		}
-		if numWorkers > 12 {
-			numWorkers = 12
+		if numWorkers > 8 {
+			numWorkers = 8
 		}
-		if numWorkers < 4 {
-			numWorkers = 4
+		if numWorkers < 2 {
+			numWorkers = 2
 		}
 		if int(totalParts) < numWorkers {
 			numWorkers = int(totalParts)

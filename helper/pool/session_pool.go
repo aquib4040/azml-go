@@ -749,7 +749,19 @@ func (p *SessionPool) AcquireLeastLoadedBot(
 		return nil, fmt.Errorf("all bots are cooling down (%ds remaining)", minRem)
 	}
 
-	// 4. Prioritize completely IDLE bots (InFlightChunks == 0) for zero-collision MTProto streaming
+	// 4. Priority 1: Strongly prefer bots NOT actively uploading (ActiveUploads == 0)
+	// to prevent concurrent UploadSaveBigFilePart and UploadGetFile on the same bot token.
+	var nonUploading []*BotSession
+	for _, b := range available {
+		if b.ActiveUploads.Load() == 0 {
+			nonUploading = append(nonUploading, b)
+		}
+	}
+	if len(nonUploading) > 0 {
+		available = nonUploading
+	}
+
+	// 5. Prioritize completely IDLE bots (InFlightChunks == 0) for zero-collision MTProto streaming
 	var idleBots []*BotSession
 	for _, b := range available {
 		if b.InFlightChunks.Load() == 0 {
@@ -775,7 +787,7 @@ func (p *SessionPool) AcquireLeastLoadedBot(
 		}
 	}
 
-	// 5. Round-robin select among targetList and atomically increment load under lock
+	// 6. Round-robin select among targetList and atomically increment load under lock
 	p.rrIndex = (p.rrIndex + 1) % len(targetList)
 	chosen := targetList[p.rrIndex]
 	chosen.AcquireChunkLoad()
@@ -950,17 +962,28 @@ func (p *SessionPool) FindBotForChat(ctx context.Context, chatID int64) *BotSess
 		return nil
 	}
 
-	// 3. Find the minimum ActiveUploads among eligible bots
-	minActive := eligible[0].ActiveUploads.Load()
-	for _, b := range eligible[1:] {
-		if a := b.ActiveUploads.Load(); a < minActive {
-			minActive = a
+	// 3. Find eligible bots with minimum ActiveUploads, preferring ActiveUploads == 0
+	var zeroUploadBots []*BotSession
+	for _, b := range eligible {
+		if b.ActiveUploads.Load() == 0 {
+			zeroUploadBots = append(zeroUploadBots, b)
 		}
 	}
+	poolToPick := eligible
+	if len(zeroUploadBots) > 0 {
+		poolToPick = zeroUploadBots
+	}
 
+	// Among candidates with minimum uploads, pick the bot with the fewest active downloads
+	minDL := poolToPick[0].ActiveDownloads.Load()
+	for _, b := range poolToPick[1:] {
+		if d := b.ActiveDownloads.Load(); d < minDL {
+			minDL = d
+		}
+	}
 	var candidates []*BotSession
-	for _, b := range eligible {
-		if b.ActiveUploads.Load() == minActive {
+	for _, b := range poolToPick {
+		if b.ActiveDownloads.Load() == minDL {
 			candidates = append(candidates, b)
 		}
 	}
@@ -1030,6 +1053,28 @@ func (p *SessionPool) ActiveSessionCount() int {
 			default:
 			}
 		}
+	}
+	return count
+}
+
+// AvailableDownloadBotsCount returns the number of ready sessions not currently assigned to uploading.
+func (p *SessionPool) AvailableDownloadBotsCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	count := 0
+	for _, s := range p.sessions {
+		if !p.IsTokenInvalid(s.Token) && s.ActiveUploads.Load() == 0 {
+			select {
+			case <-s.ready:
+				if s.readyErr == nil {
+					count++
+				}
+			default:
+			}
+		}
+	}
+	if count <= 0 {
+		return 1
 	}
 	return count
 }

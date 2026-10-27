@@ -429,7 +429,7 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		}
 		minInterval := 3 * time.Second
 		if force {
-			minInterval = 1500 * time.Millisecond
+			minInterval = 2500 * time.Millisecond
 		}
 		if time.Since(r.LastEdit) < minInterval {
 			continue
@@ -461,8 +461,18 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 			}
 			// Rate limits / FloodWait / Too Many Requests: back off without dropping status tracking
 			if strings.Contains(errStr, "TOO MANY REQUESTS") || strings.Contains(errStr, "RETRY AFTER") || strings.Contains(errStr, "FLOOD") {
+				backoffSec := 4
+				lower := strings.ToLower(errStr)
+				if idx := strings.Index(lower, "retry after "); idx != -1 {
+					fields := strings.Fields(lower[idx+len("retry after "):])
+					if len(fields) > 0 {
+						if n, pErr := strconv.Atoi(strings.Trim(fields[0], ",.")); pErr == nil && n > 0 {
+							backoffSec = n
+						}
+					}
+				}
 				m.mu.Lock()
-				r.LastEdit = time.Now().Add(3 * time.Second)
+				r.LastEdit = time.Now().Add(time.Duration(backoffSec+1) * time.Second)
 				m.mu.Unlock()
 				continue
 			}

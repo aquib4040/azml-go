@@ -434,6 +434,9 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 		if strings.Contains(strings.ToLower(err.Error()), "message to edit not found") {
 			return err
 		}
+		if strings.Contains(strings.ToLower(err.Error()), "too many requests") {
+			return err
+		}
 		log.Printf("[AZML-Go Bot API] EditMessage failed: %v, falling back to MTProto", err)
 	}
 

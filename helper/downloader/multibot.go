@@ -23,9 +23,12 @@ import (
 
 var globalActiveDownloads atomic.Int64
 
-func computeTargetWorkers(activeDownloads int64, totalBots int, numTasks int) int {
-	if totalBots <= 0 {
-		totalBots = 1
+func computeTargetWorkers(activeDownloads int64, availableBots int, numTasks int) int {
+	if availableBots <= 0 {
+		availableBots = 1
+	}
+	if activeDownloads <= 0 {
+		activeDownloads = 1
 	}
 
 	// Environment variable manual override
@@ -38,8 +41,10 @@ func computeTargetWorkers(activeDownloads int64, totalBots int, numTasks int) in
 		}
 	}
 
-	// Fair allocation: For up to 4 concurrent downloads (the configured maximum),
-	// maintain 5 to 6 workers per file so download speed stays consistently high (>10 MB/s).
+	// Fair allocation:
+	// 1 active download: 6 workers (saturates multi-bot pool without spam).
+	// 2 to 4 active downloads: 5 workers each.
+	// 5+ active downloads: 4 workers each.
 	var target int
 	if activeDownloads <= 1 {
 		target = 6
@@ -47,6 +52,18 @@ func computeTargetWorkers(activeDownloads int64, totalBots int, numTasks int) in
 		target = 5
 	} else {
 		target = 4
+	}
+
+	// When availableBots is constrained (e.g. fewer than 8 bots available due to uploads),
+	// clamp target so total download workers do not excessively overwhelm the available pool.
+	if availableBots > 0 && availableBots < 8 && int(activeDownloads) > 0 {
+		maxPerDL := availableBots / int(activeDownloads)
+		if maxPerDL < 2 {
+			maxPerDL = 2
+		}
+		if target > maxPerDL {
+			target = maxPerDL
+		}
 	}
 
 	if target > numTasks {
@@ -124,15 +141,11 @@ func (m *MultiBotDownloader) DownloadToFile(
 
 	_ = out.Truncate(fileSize)
 
-	activeBots := m.pool.ActiveSessionCount()
-	if activeBots <= 0 {
-		activeBots = 1
-	}
-
+	availableBots := m.pool.AvailableDownloadBotsCount()
 	activeDownloads := globalActiveDownloads.Add(1)
 	defer globalActiveDownloads.Add(-1)
 
-	numWorkers := computeTargetWorkers(activeDownloads, activeBots, totalParts)
+	numWorkers := computeTargetWorkers(activeDownloads, availableBots, totalParts)
 	bufferLimit := numWorkers * 2
 
 	partActualSize := make([]int64, totalParts)
@@ -206,8 +219,8 @@ func (m *MultiBotDownloader) DownloadToFile(
 		}
 	}
 
-	log.Printf("[MultiBot DL] 🚀 Starting download: %s (%s), %d parts, %d workers (Active DLs: %d, MTProto Bots: %d)",
-		filepath.Base(destPath), ext.GetReadableFileSize(fileSize), totalParts, numWorkers, activeDownloads, activeBots)
+	log.Printf("[MultiBot DL] 🚀 Starting download: %s (%s), %d parts, %d workers (Active DLs: %d, Avail Bots: %d)",
+		filepath.Base(destPath), ext.GetReadableFileSize(fileSize), totalParts, numWorkers, activeDownloads, availableBots)
 
 	var wg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
@@ -303,10 +316,16 @@ func (m *MultiBotDownloader) fetchChunkWithRetry(
 
 		currentBot, bErr := m.pool.AcquireLeastLoadedBot(m.workerTokens, m.apiID, m.apiHash, failedTokens)
 		if bErr != nil || currentBot == nil {
+			waitDur := time.Duration(200+rand.Intn(200)) * time.Millisecond
+			if bErr != nil && strings.Contains(bErr.Error(), "cooling down") {
+				// Exponential backoff with jitter when all bots are cooling down
+				// Prevents thundering herd when a bot exits cooldown.
+				waitDur = time.Duration(1200+rand.Intn(1000)) * time.Millisecond
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(200+rand.Intn(200)) * time.Millisecond):
+			case <-time.After(waitDur):
 			}
 			continue
 		}
