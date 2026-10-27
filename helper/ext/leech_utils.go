@@ -423,25 +423,61 @@ func applyRegexRemname(filename, rules string) string {
 	return base + ext
 }
 
-func SplitFile(filePath string, maxSplitSize int64, outDir string) ([]string, error) {
+func isVideoExtension(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts":
+		return true
+	}
+	return false
+}
+
+func SplitFile(filePath string, maxSplitSize int64, outDir string, equalSplits bool) ([]string, error) {
 	_ = os.MkdirAll(outDir, 0755)
 	fi, err := os.Stat(filePath)
 	if err != nil {
 		return nil, err
 	}
-	if fi.Size() <= maxSplitSize {
+	fileSize := fi.Size()
+	if fileSize <= maxSplitSize {
 		return []string{filePath}, nil
 	}
 
-	details, probeErr := ProbeMedia(filePath)
-	if probeErr == nil && details.Duration > 5 {
-		partsCount := int(fi.Size()/maxSplitSize) + 1
-		partDuration := details.Duration / partsCount
-		var parts []string
-		ext := filepath.Ext(filePath)
-		base := strings.TrimSuffix(filepath.Base(filePath), ext)
+	// Safety margin of 5MB so Telegram never rejects with FILE_TOO_BIG (under 2GB / 4GB)
+	splitSize := maxSplitSize - (5 * 1024 * 1024)
+	if splitSize <= 0 {
+		splitSize = maxSplitSize
+	}
 
-		for i := 0; i < partsCount; i++ {
+	partsCount := int((fileSize + maxSplitSize - 1) / maxSplitSize)
+	if equalSplits && partsCount > 1 {
+		splitSize = (fileSize + int64(partsCount) - 1) / int64(partsCount) + 1024
+	}
+
+	extName := strings.ToLower(filepath.Ext(filePath))
+	details, probeErr := ProbeMedia(filePath)
+	if probeErr == nil && details.Duration > 5 && isVideoExtension(extName) {
+		parts, vErr := splitVideo(filePath, fileSize, splitSize, details.Duration, outDir, partsCount, equalSplits)
+		if vErr == nil && len(parts) > 1 {
+			return parts, nil
+		}
+		// If video split failed, clean up any partial files and fallback to binary split
+		for _, p := range parts {
+			_ = os.Remove(p)
+		}
+	}
+
+	return splitBinary(filePath, splitSize, outDir)
+}
+
+func splitVideo(filePath string, totalSize int64, splitSize int64, duration int, outDir string, expectedParts int, equalSplits bool) ([]string, error) {
+	var parts []string
+	ext := filepath.Ext(filePath)
+	base := strings.TrimSuffix(filepath.Base(filePath), ext)
+
+	// Equal duration split branch (only when EqualSplits is explicitly requested)
+	if equalSplits && expectedParts > 1 {
+		partDuration := duration / expectedParts
+		for i := 0; i < expectedParts; i++ {
 			partPath := filepath.Join(outDir, fmt.Sprintf("%s.part%03d%s", base, i+1, ext))
 			start := i * partDuration
 			cmd := exec.Command("ffmpeg",
@@ -457,12 +493,94 @@ func SplitFile(filePath string, maxSplitSize int64, outDir string) ([]string, er
 				parts = append(parts, partPath)
 			}
 		}
-		if len(parts) > 0 {
+		if len(parts) > 1 {
 			return parts, nil
 		}
+		for _, p := range parts {
+			_ = os.Remove(p)
+		}
+		parts = nil
 	}
 
-	return splitBinary(filePath, maxSplitSize, outDir)
+	// Default branch: Size-based split (-fs splitSize) like AZML
+	// Part 1 fills up to ~2GB (splitSize), and Part 2 gets the remaining ~40MB
+	startTime := 0
+	partIdx := 1
+	maxLoops := expectedParts + 5 // safety limit
+
+	for (partIdx <= expectedParts || startTime < duration-4) && partIdx <= maxLoops {
+		partPath := filepath.Join(outDir, fmt.Sprintf("%s.part%03d%s", base, partIdx, ext))
+		_ = os.Remove(partPath)
+
+		// Try with -map 0 first (preserves all audio/subtitle streams like AZML)
+		cmd := exec.Command("ffmpeg",
+			"-hide_banner", "-loglevel", "error",
+			"-ss", strconv.Itoa(startTime),
+			"-i", filePath,
+			"-fs", strconv.FormatInt(splitSize, 10),
+			"-map", "0",
+			"-map_chapters", "-1",
+			"-async", "1",
+			"-strict", "-2",
+			"-c", "copy",
+			partPath, "-y",
+		)
+		err := cmd.Run()
+		if err != nil {
+			// If -map 0 failed, retry without -map 0
+			_ = os.Remove(partPath)
+			cmdRetry := exec.Command("ffmpeg",
+				"-hide_banner", "-loglevel", "error",
+				"-ss", strconv.Itoa(startTime),
+				"-i", filePath,
+				"-fs", strconv.FormatInt(splitSize, 10),
+				"-map_chapters", "-1",
+				"-async", "1",
+				"-strict", "-2",
+				"-c", "copy",
+				partPath, "-y",
+			)
+			if rErr := cmdRetry.Run(); rErr != nil {
+				return nil, fmt.Errorf("ffmpeg split failed on part %d: %w", partIdx, rErr)
+			}
+		}
+
+		pStat, statErr := os.Stat(partPath)
+		if statErr != nil || pStat.Size() < 1024 {
+			_ = os.Remove(partPath)
+			break
+		}
+
+		pDetails, pErr := ProbeMedia(partPath)
+		if pErr != nil || pDetails.Duration <= 0 {
+			return nil, fmt.Errorf("could not probe part %d duration", partIdx)
+		}
+
+		// If duration of trailing keyframe fragment is negligible (<= 3s), drop it
+		if pDetails.Duration <= 3 && partIdx > 1 {
+			_ = os.Remove(partPath)
+			break
+		}
+
+		parts = append(parts, partPath)
+
+		// Advance startTime by part duration minus 3s overlap (as in AZML for keyframe alignment)
+		advance := pDetails.Duration - 3
+		if advance <= 0 {
+			advance = pDetails.Duration
+		}
+		startTime += advance
+
+		if startTime >= duration-4 {
+			break
+		}
+		partIdx++
+	}
+
+	if len(parts) > 1 {
+		return parts, nil
+	}
+	return nil, fmt.Errorf("size-based video split produced %d parts, expected > 1", len(parts))
 }
 
 func splitBinary(filePath string, maxSplitSize int64, outDir string) ([]string, error) {

@@ -37,6 +37,11 @@ func parseDurationString(s string) int {
 		secParts := strings.Split(parts[2], ".")
 		sec, _ := strconv.Atoi(secParts[0])
 		return h*3600 + m*60 + sec
+	} else if len(parts) == 2 {
+		m, _ := strconv.Atoi(parts[0])
+		secParts := strings.Split(parts[1], ".")
+		sec, _ := strconv.Atoi(secParts[0])
+		return m*60 + sec
 	}
 	return 0
 }

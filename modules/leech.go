@@ -92,7 +92,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 	}
 
 	// Bulk Leech Handling (-b / -bulk)
-	if strings.Contains(msg.Text, "-b") || strings.Contains(msg.Text, "-bulk") {
+	if opt.Bulk {
 		var rawLinks []string
 		sourceText := ""
 		if msg.IsReply && msg.ReplyText != "" && !msg.HasMedia && msg.RawMedia == nil {
@@ -114,20 +114,26 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		}
 
 		bulkLinks := rawLinks
-		parts := strings.Fields(msg.Text)
-		for idx, p := range parts {
-			if (p == "-b" || p == "-bulk") && idx+1 < len(parts) && strings.Contains(parts[idx+1], ":") {
-				rangeParts := strings.Split(parts[idx+1], ":")
-				start, _ := strconv.Atoi(rangeParts[0])
-				end, _ := strconv.Atoi(rangeParts[1])
-				if start < len(rawLinks) {
-					if end > 0 && end <= len(rawLinks) {
-						bulkLinks = rawLinks[start:end]
-					} else {
-						bulkLinks = rawLinks[start:]
-					}
+		rangeStr := opt.BulkRange
+		if rangeStr == "" {
+			parts := strings.Fields(msg.Text)
+			for idx, p := range parts {
+				if (p == "-b" || p == "-bulk") && idx+1 < len(parts) && strings.Contains(parts[idx+1], ":") {
+					rangeStr = parts[idx+1]
+					break
 				}
-				break
+			}
+		}
+		if rangeStr != "" && strings.Contains(rangeStr, ":") {
+			rangeParts := strings.Split(rangeStr, ":")
+			start, _ := strconv.Atoi(rangeParts[0])
+			end, _ := strconv.Atoi(rangeParts[1])
+			if start < len(rawLinks) {
+				if end > 0 && end <= len(rawLinks) {
+					bulkLinks = rawLinks[start:end]
+				} else {
+					bulkLinks = rawLinks[start:]
+				}
 			}
 		}
 
@@ -1123,7 +1129,9 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			finalName = opt.CustomName
 		}
 		if filepath.Ext(finalName) == "" {
-			if detectedExt := ext.DetectExtension(curFile); detectedExt != "" {
+			if origExt := filepath.Ext(origBase); origExt != "" {
+				finalName += origExt
+			} else if detectedExt := ext.DetectExtension(curFile); detectedExt != "" {
 				finalName += detectedExt
 			}
 		}
@@ -1189,8 +1197,13 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			splitSize = maxSplit
 		}
 
+		equalSplits := cfg.EqualSplits
+		if user != nil {
+			equalSplits = user.EqualSplits
+		}
+
 		splitDir := filepath.Join(taskDir, "splits")
-		splitParts, splitErr := ext.SplitFile(curFile, splitSize, splitDir)
+		splitParts, splitErr := ext.SplitFile(curFile, splitSize, splitDir, equalSplits)
 		if splitErr != nil || len(splitParts) == 0 {
 			splitParts = []string{curFile}
 		}
@@ -1393,6 +1406,12 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 	for i := 1; i < len(tokens); i++ {
 		tok := tokens[i]
 		switch tok {
+		case "-b", "-bulk":
+			opt.Bulk = true
+			if i+1 < len(tokens) && !isLeechFlag(tokens[i+1]) && !ext.IsURL(tokens[i+1]) && !ext.IsMagnet(tokens[i+1]) && strings.Contains(tokens[i+1], ":") {
+				opt.BulkRange = tokens[i+1]
+				i++
+			}
 		case "-z", "-zip":
 			opt.IsZip = true
 		case "-e", "-extract", "-uz", "-unzip":

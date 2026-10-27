@@ -98,6 +98,7 @@ type LeechOptions struct {
 	Username    string
 	Password    string
 	Bulk        bool
+	BulkRange   string
 	Select      bool
 	Multi       int
 	MediaGroup  bool
