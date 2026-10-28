@@ -15,7 +15,6 @@ jobs:
   deploy:
     name: Deploy to Heroku
     runs-on: ubuntu-latest
-    if: ${{ secrets.HEROKU_API_KEY != '' && secrets.HEROKU_APP_NAME != '' }}
 
     steps:
       - name: Checkout Repository
@@ -23,11 +22,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify Secrets
+        id: check-secrets
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          HEROKU_APP_NAME: ${{ secrets.HEROKU_APP_NAME }}
+        run: |
+          if [ -z "$HEROKU_API_KEY" ] || [ -z "$HEROKU_APP_NAME" ]; then
+            echo "::notice::HEROKU_API_KEY or HEROKU_APP_NAME is not configured in repository secrets. Skipping Heroku deployment."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Heroku CLI
+        if: steps.check-secrets.outputs.skip == 'false'
         run: |
           curl https://cli-assets.heroku.com/install.sh | sh
 
       - name: Configure Heroku and Environment
+        if: steps.check-secrets.outputs.skip == 'false'
         id: setup-heroku
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
@@ -39,11 +53,6 @@ jobs:
           TELEGRAM_HASH: ${{ secrets.TELEGRAM_HASH }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          if [ -z "$HEROKU_API_KEY" ] || [ -z "$HEROKU_APP_NAME" ]; then
-            echo "::error::HEROKU_API_KEY and HEROKU_APP_NAME must be set in repository secrets."
-            exit 1
-          fi
-
           # Configure netrc for Heroku CLI and Git authentication
           cat > ~/.netrc <<EOF
           machine api.heroku.com
@@ -84,6 +93,7 @@ jobs:
           fi
 
       - name: Deploy to Heroku Remote Git (Server Docker Build)
+        if: steps.check-secrets.outputs.skip == 'false'
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
           HEROKU_APP_NAME: ${{ secrets.HEROKU_APP_NAME }}
