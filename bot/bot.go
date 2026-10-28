@@ -491,6 +491,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 			if msgCtx.RawMedia == nil {
 				fetchCtx, fetchCancel := context.WithTimeout(ctx, 8*time.Second)
 				var repliedMsg *tg.Message
+			fetchLoop:
 				for attempt := 0; attempt < 3; attempt++ {
 					var err error
 					repliedMsg, err = telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID)
@@ -499,7 +500,7 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 					}
 					select {
 					case <-fetchCtx.Done():
-						break
+						break fetchLoop
 					case <-time.After(250 * time.Millisecond):
 					}
 				}

@@ -470,4 +470,3 @@ func ResolveDownloadMetadata(ctx context.Context, rawURL string) (string, string
 
 	return filename, finalURL, totalSize, nil
 }
-

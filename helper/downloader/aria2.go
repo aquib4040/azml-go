@@ -165,14 +165,14 @@ func autoInstallStaticAria2(targetPath string) error {
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			continue
 		}
 
 		gzReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			lastErr = err
 			continue
 		}
@@ -195,7 +195,7 @@ func autoInstallStaticAria2(targetPath string) error {
 					break
 				}
 				_, err = io.Copy(outFile, tarReader)
-				outFile.Close()
+				_ = outFile.Close()
 				if err != nil {
 					lastErr = err
 					break
@@ -206,8 +206,8 @@ func autoInstallStaticAria2(targetPath string) error {
 				break
 			}
 		}
-		gzReader.Close()
-		resp.Body.Close()
+		_ = gzReader.Close()
+		_ = resp.Body.Close()
 
 		if found {
 			return nil
@@ -311,7 +311,7 @@ func (a *Aria2RPCClient) rawCall(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var rpcResp JSONRPCResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
@@ -340,18 +340,18 @@ func (a *Aria2RPCClient) AddURI(link, downloadDir, filename string, headers []st
 	_ = os.MkdirAll(downloadDir, 0755)
 
 	opts := map[string]interface{}{
-		"dir":                         downloadDir,
-		"max-connection-per-server":   "16",
-		"split":                       "16",
-		"min-split-size":              "1M",
-		"allow-overwrite":             "true",
-		"check-certificate":           "false",
-		"bt-max-peers":                "64",
-		"max-upload-limit":            "1K",
-		"bt-request-peer-speed-limit": "0",
-		"seed-time":                   "0",
-		"seed-ratio":                  "0.0",
-		"follow-torrent":              "mem",
+		"dir":                              downloadDir,
+		"max-connection-per-server":        "16",
+		"split":                            "16",
+		"min-split-size":                   "1M",
+		"allow-overwrite":                  "true",
+		"check-certificate":                "false",
+		"bt-max-peers":                     "64",
+		"max-upload-limit":                 "1K",
+		"bt-request-peer-speed-limit":      "0",
+		"seed-time":                        "0",
+		"seed-ratio":                       "0.0",
+		"follow-torrent":                   "mem",
 		"content-disposition-default-utf8": "true",
 	}
 

@@ -56,7 +56,7 @@ func copyMessageViaBotAPI(botToken string, toChatID int64, fromChatID int64, msg
 		log.Printf("[AZML-Go Uploader] copyMessage HTTP error to %d: %v", toChatID, err)
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var res struct {
 		Ok          bool   `json:"ok"`
 		Description string `json:"description"`
@@ -83,7 +83,7 @@ func deleteMessageViaBotAPI(botToken string, chatID int64, msgID int) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var res struct {
 		Ok bool `json:"ok"`
 	}
@@ -234,7 +234,7 @@ func (c *uploadFloodCoordinator) HandleFloodWait(waitDur time.Duration, partInde
 		}
 		if c.floodUntilMs.CompareAndSwap(currUntil, targetUntil) {
 			log.Printf("[AZML-Go Uploader] Telegram FloodWait of %v on part %d/%d. Pausing upload workers for %v (will resume at full speed)...",
-				waitDur, partIndex, totalParts, time.Duration(waitDur+350*time.Millisecond).Round(time.Millisecond))
+				waitDur, partIndex, totalParts, (waitDur + 350*time.Millisecond).Round(time.Millisecond))
 			if c.onFloodWait != nil {
 				c.onFloodWait(waitDur)
 			}

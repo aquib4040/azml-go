@@ -137,7 +137,7 @@ func (m *MultiBotDownloader) DownloadToFile(
 	if err != nil {
 		return fmt.Errorf("failed to open destination file %s: %w", destPath, err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	_ = out.Truncate(fileSize)
 

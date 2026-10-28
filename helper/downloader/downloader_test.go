@@ -7,7 +7,7 @@ import (
 )
 
 func TestComputeTargetWorkers(t *testing.T) {
-	os.Unsetenv("DOWNLOAD_THREADS")
+	_ = os.Unsetenv("DOWNLOAD_THREADS")
 
 	// 1 active download
 	if w := computeTargetWorkers(1, 10, 100); w != 6 {
@@ -27,11 +27,10 @@ func TestComputeTargetWorkers(t *testing.T) {
 	}
 
 	// Environment variable override
-	os.Setenv("DOWNLOAD_THREADS", "7")
+	t.Setenv("DOWNLOAD_THREADS", "7")
 	if w := computeTargetWorkers(4, 10, 100); w != 7 {
 		t.Errorf("expected 7 workers with DOWNLOAD_THREADS=7, got %d", w)
 	}
-	os.Unsetenv("DOWNLOAD_THREADS")
 }
 
 func TestTelegramChunkDownloaderDecayPacing(t *testing.T) {

@@ -450,7 +450,7 @@ func SplitFile(filePath string, maxSplitSize int64, outDir string, equalSplits b
 
 	partsCount := int((fileSize + maxSplitSize - 1) / maxSplitSize)
 	if equalSplits && partsCount > 1 {
-		splitSize = (fileSize + int64(partsCount) - 1) / int64(partsCount) + 1024
+		splitSize = (fileSize+int64(partsCount)-1)/int64(partsCount) + 1024
 	}
 
 	extName := strings.ToLower(filepath.Ext(filePath))
@@ -840,4 +840,3 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 
 	return ""
 }
-

@@ -471,7 +471,7 @@ func (m *MessageSender) sendBotAPIMessage(ctx context.Context, botToken string, 
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var res struct {
 		Ok          bool   `json:"ok"`
@@ -515,7 +515,7 @@ func (m *MessageSender) editBotAPIMessage(ctx context.Context, botToken string, 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var res struct {
 		Ok          bool   `json:"ok"`
@@ -544,7 +544,7 @@ func (m *MessageSender) editBotAPIMessage(ctx context.Context, botToken string, 
 		if cErr == nil {
 			capReq.Header.Set("Content-Type", "application/json")
 			if capResp, doErr := botAPIHTTPClient.Do(capReq); doErr == nil {
-				defer capResp.Body.Close()
+				defer func() { _ = capResp.Body.Close() }()
 				var capRes struct {
 					Ok          bool   `json:"ok"`
 					Description string `json:"description"`
@@ -631,7 +631,7 @@ func (m *MessageSender) SendPhotoFromURLWithButtons(ctx context.Context, peer tg
 			req.Header.Set("Content-Type", "application/json")
 			resp, rErr := botAPIHTTPClient.Do(req)
 			if rErr == nil {
-				defer resp.Body.Close()
+				defer func() { _ = resp.Body.Close() }()
 				var res struct {
 					Ok     bool `json:"ok"`
 					Result struct {
@@ -654,7 +654,7 @@ func (m *MessageSender) SendPhotoFromURLWithButtons(ctx context.Context, peer tg
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("bad HTTP status fetching photo: %d", resp.StatusCode)

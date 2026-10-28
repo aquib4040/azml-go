@@ -25,8 +25,8 @@ type StatusReplyInfo struct {
 }
 
 type StatusModule struct {
-	sender        *telegram.MessageSender
-	taskMgr       *ext.TaskManager
+	sender         *telegram.MessageSender
+	taskMgr        *ext.TaskManager
 	statusReplies  map[int64]*StatusReplyInfo
 	chatPages      map[int64]int
 	chatPeers      map[int64]tg.InputPeerClass
