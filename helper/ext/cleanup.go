@@ -28,7 +28,6 @@ func CleanDownloadsDir() {
 		fullPath := filepath.Join(dlDir, entry.Name())
 		_ = os.RemoveAll(fullPath)
 	}
-	_ = os.RemoveAll("Thumbnails")
 	_ = os.MkdirAll("Thumbnails", 0755)
 	_ = os.MkdirAll(dlDir, 0755)
 	log.Println("[CLEANUP] Downloads directory initialized clean.")
@@ -39,7 +38,7 @@ func CleanDownloadsDir() {
 // folders with no active tasks in TaskManager and only if disk space drops below safety thresholds.
 func StartPeriodicStorageCleaner() {
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 
 		for range ticker.C {
@@ -52,6 +51,9 @@ func StartPeriodicStorageCleaner() {
 			// Check if disk space is actually low before attempting any cleanup
 			freeBytes := GetFreeDiskSpace(dlDir)
 			thresholdBytes := cfg.StorageThreshold * 1024 * 1024 * 1024
+			if thresholdBytes <= 0 {
+				thresholdBytes = 1 * 1024 * 1024 * 1024 // 1GB default threshold
+			}
 			if freeBytes > thresholdBytes*2 {
 				// Ample free disk space, do not delete anything
 				continue
@@ -89,10 +91,10 @@ func StartPeriodicStorageCleaner() {
 					continue
 				}
 
-				// Only consider orphaned folders with zero write activity for over 78 hours
-				if now.Sub(info.ModTime()) > 78*time.Hour {
+				// Purge orphaned non-task folders idle for > 30 minutes when storage is low
+				if now.Sub(info.ModTime()) > 30*time.Minute {
 					log.Printf("[EMERGENCY CLEANUP] Purging inactive orphaned folder to preserve disk space: %s (idle for %v)",
-						fullPath, now.Sub(info.ModTime()).Round(time.Hour))
+						fullPath, now.Sub(info.ModTime()).Round(time.Minute))
 					_ = os.RemoveAll(fullPath)
 				}
 			}

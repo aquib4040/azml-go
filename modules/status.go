@@ -27,19 +27,23 @@ type StatusReplyInfo struct {
 type StatusModule struct {
 	sender        *telegram.MessageSender
 	taskMgr       *ext.TaskManager
-	statusReplies map[int64]*StatusReplyInfo
-	chatPages     map[int64]int
-	mu            sync.RWMutex
-	stopTicker    chan struct{}
+	statusReplies  map[int64]*StatusReplyInfo
+	chatPages      map[int64]int
+	chatPeers      map[int64]tg.InputPeerClass
+	reservingSlots map[int64]time.Time
+	mu             sync.RWMutex
+	stopTicker     chan struct{}
 }
 
 func NewStatusModule(sender *telegram.MessageSender) *StatusModule {
 	mod := &StatusModule{
-		sender:        sender,
-		taskMgr:       ext.GetTaskManager(),
-		statusReplies: make(map[int64]*StatusReplyInfo),
-		chatPages:     make(map[int64]int),
-		stopTicker:    make(chan struct{}),
+		sender:         sender,
+		taskMgr:        ext.GetTaskManager(),
+		statusReplies:  make(map[int64]*StatusReplyInfo),
+		chatPages:      make(map[int64]int),
+		chatPeers:      make(map[int64]tg.InputPeerClass),
+		reservingSlots: make(map[int64]time.Time),
+		stopTicker:     make(chan struct{}),
 	}
 	mod.startPeriodicUpdateLoop()
 	return mod
@@ -124,7 +128,42 @@ func (m *StatusModule) HandleStatus(ctx context.Context, peer tg.InputPeerClass,
 		LastEdit:    time.Now(),
 	}
 	m.chatPages[msg.ChatID] = page
+	m.chatPeers[msg.ChatID] = peer
 	m.mu.Unlock()
+}
+
+func (m *StatusModule) HasStatusMessage(chatID int64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	info, ok := m.statusReplies[chatID]
+	return ok && info != nil && info.MessageID > 0
+}
+
+func (m *StatusModule) GetStatusMessageID(chatID int64) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if info, ok := m.statusReplies[chatID]; ok && info != nil {
+		return info.MessageID
+	}
+	return 0
+}
+
+// ReserveStatusSlot atomically reserves status message creation for a chat,
+// preventing concurrent commands from colliding and deleting each other's status messages.
+func (m *StatusModule) ReserveStatusSlot(chatID int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if info, ok := m.statusReplies[chatID]; ok && info != nil && info.MessageID > 0 {
+		return false
+	}
+	if t, ok := m.reservingSlots[chatID]; ok && time.Since(t) < 5*time.Second {
+		return false
+	}
+	if m.reservingSlots == nil {
+		m.reservingSlots = make(map[int64]time.Time)
+	}
+	m.reservingSlots[chatID] = time.Now()
+	return true
 }
 
 func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPeerClass) {
@@ -132,14 +171,18 @@ func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPe
 		return
 	}
 	m.mu.Lock()
-	// Never show 2 task/status messages at once! Delete old message if exists
+	defer m.mu.Unlock()
+
+	// If a status message already exists and is active for this chat,
+	// do NOT delete the existing one! Auto-delete the duplicate msgID after 3s to keep chat clean.
 	if old, exists := m.statusReplies[chatID]; exists && old != nil && old.MessageID > 0 && old.MessageID != msgID {
 		go func(p tg.InputPeerClass, id int) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = m.sender.DeleteMessage(ctx, p, []int{id})
-		}(old.Peer, old.MessageID)
+			m.sender.AutoDeleteMessage(p, id, 3)
+		}(peer, msgID)
+		return
 	}
+
+	m.chatPeers[chatID] = peer
 	m.statusReplies[chatID] = &StatusReplyInfo{
 		ChatID:      chatID,
 		MessageID:   msgID,
@@ -148,7 +191,6 @@ func (m *StatusModule) SetStatusMessage(chatID int64, msgID int, peer tg.InputPe
 		LastEdit:    time.Time{},
 		CreatedAt:   time.Now(),
 	}
-	m.mu.Unlock()
 	if m.taskMgr.Count() > 0 {
 		go m.UpdateAllMessages(context.Background(), true)
 	}
@@ -167,6 +209,13 @@ func (m *StatusModule) DeleteAllMessages(ctx context.Context) {
 		m.mu.Unlock()
 		return
 	}
+	// Protect status messages of newly starting tasks from being prematurely wiped
+	for _, r := range m.statusReplies {
+		if r != nil && time.Since(r.CreatedAt) < 15*time.Second {
+			m.mu.Unlock()
+			return
+		}
+	}
 	replies := make([]*StatusReplyInfo, 0, len(m.statusReplies))
 	for _, r := range m.statusReplies {
 		replies = append(replies, r)
@@ -181,7 +230,7 @@ func (m *StatusModule) DeleteAllMessages(ctx context.Context) {
 	}
 }
 
-func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string) {
+func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64) {
 	parts := strings.Fields(data)
 	if len(parts) < 2 {
 		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
@@ -205,6 +254,10 @@ func (m *StatusModule) HandleCallback(ctx context.Context, peer tg.InputPeerClas
 			gid := parts[2]
 			task := m.taskMgr.GetTask(gid)
 			if task != nil {
+				if fromUID != 0 && task.UserID() != 0 && task.UserID() != fromUID && !telegram.IsOwner(fromUID) {
+					_ = m.sender.AnswerCallback(ctx, queryID, "⚠️ It's not your task to cancel!", true)
+					return
+				}
 				_ = task.Cancel()
 				m.taskMgr.RemoveTask(gid)
 				_ = m.sender.AnswerCallback(ctx, queryID, "× Task Cancelled!", false)
@@ -323,6 +376,40 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		return
 	}
 
+	// Auto-heal: If tasks are actively running in a chat, but no status message is currently tracked,
+	// automatically recreate the status message using the known peer for that chat.
+	activeChatTasks := make(map[int64]bool)
+	for _, t := range m.taskMgr.GetAllTasks() {
+		if cID := t.ChatID(); cID != 0 {
+			activeChatTasks[cID] = true
+		}
+	}
+
+	for cID := range activeChatTasks {
+		m.mu.RLock()
+		info, hasStatus := m.statusReplies[cID]
+		peer, hasPeer := m.chatPeers[cID]
+		m.mu.RUnlock()
+
+		if (!hasStatus || info == nil || info.MessageID <= 0) && hasPeer && peer != nil {
+			page := m.getChatPage(cID)
+			text, btn := m.taskMgr.BuildStatusMessage(page)
+			sentID, err := m.sender.SendMessageWithButtons(ctx, peer, text, 0, btn, 3)
+			if err == nil && sentID > 0 {
+				m.mu.Lock()
+				m.statusReplies[cID] = &StatusReplyInfo{
+					ChatID:      cID,
+					MessageID:   sentID,
+					Peer:        peer,
+					CurrentPage: page,
+					LastEdit:    time.Now(),
+					CreatedAt:   time.Now(),
+				}
+				m.mu.Unlock()
+			}
+		}
+	}
+
 	m.mu.Lock()
 	if len(m.statusReplies) == 0 {
 		m.mu.Unlock()
@@ -340,7 +427,11 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		if r.MessageID == 0 {
 			continue
 		}
-		if !force && time.Since(r.LastEdit) < 3*time.Second {
+		minInterval := 3 * time.Second
+		if force {
+			minInterval = 2500 * time.Millisecond
+		}
+		if time.Since(r.LastEdit) < minInterval {
 			continue
 		}
 
@@ -359,10 +450,72 @@ func (m *StatusModule) UpdateAllMessages(ctx context.Context, force bool) {
 		text, btn := m.taskMgr.BuildStatusMessage(targetPage)
 		err := m.sender.EditMessageWithButtons(ctx, r.Peer, r.MessageID, text, btn, 3)
 		if err != nil {
-			if strings.Contains(err.Error(), "MESSAGE_ID_INVALID") || strings.Contains(err.Error(), "400") {
+			errStr := strings.ToUpper(err.Error())
+			// MESSAGE_NOT_MODIFIED is normal Telegram behavior when text hasn't changed.
+			// NEVER delete active status tracking on MESSAGE_NOT_MODIFIED!
+			if strings.Contains(errStr, "MESSAGE_NOT_MODIFIED") {
 				m.mu.Lock()
-				delete(m.statusReplies, r.ChatID)
+				r.LastEdit = time.Now()
 				m.mu.Unlock()
+				continue
+			}
+			// Rate limits / FloodWait / Too Many Requests: back off without dropping status tracking
+			if strings.Contains(errStr, "TOO MANY REQUESTS") || strings.Contains(errStr, "RETRY AFTER") || strings.Contains(errStr, "FLOOD") {
+				backoffSec := 4
+				lower := strings.ToLower(errStr)
+				if idx := strings.Index(lower, "retry after "); idx != -1 {
+					fields := strings.Fields(lower[idx+len("retry after "):])
+					if len(fields) > 0 {
+						if n, pErr := strconv.Atoi(strings.Trim(fields[0], ",.")); pErr == nil && n > 0 {
+							backoffSec = n
+						}
+					}
+				}
+				m.mu.Lock()
+				r.LastEdit = time.Now().Add(time.Duration(backoffSec+1) * time.Second)
+				m.mu.Unlock()
+				continue
+			}
+			// Only drop tracking if the message or peer was actually deleted/invalid
+			if strings.Contains(errStr, "MESSAGE_ID_INVALID") ||
+				strings.Contains(errStr, "MESSAGE TO EDIT NOT FOUND") ||
+				strings.Contains(errStr, "MESSAGE_EMPTY") ||
+				strings.Contains(errStr, "CHAT_ADMIN_REQUIRED") ||
+				strings.Contains(errStr, "PEER_ID_INVALID") ||
+				strings.Contains(errStr, "MESSAGE_DELETE_FORBIDDEN") {
+				m.mu.Lock()
+				if curr, ok := m.statusReplies[r.ChatID]; ok && curr.MessageID == r.MessageID {
+					delete(m.statusReplies, r.ChatID)
+				}
+				m.mu.Unlock()
+
+				// Auto-heal immediately: If tasks are actively running in this chat,
+				// send a fresh status message so the progress bar never disappears!
+				if m.taskMgr.Count() > 0 {
+					go func(cID int64, p tg.InputPeerClass, pg int) {
+						time.Sleep(500 * time.Millisecond)
+						m.mu.RLock()
+						_, alreadyTracked := m.statusReplies[cID]
+						m.mu.RUnlock()
+						if !alreadyTracked && m.taskMgr.Count() > 0 {
+							newText, newBtn := m.taskMgr.BuildStatusMessage(pg)
+							sentID, sErr := m.sender.SendMessageWithButtons(context.Background(), p, newText, 0, newBtn, 3)
+							if sErr == nil && sentID > 0 {
+								m.mu.Lock()
+								m.statusReplies[cID] = &StatusReplyInfo{
+									ChatID:      cID,
+									MessageID:   sentID,
+									Peer:        p,
+									CurrentPage: pg,
+									LastEdit:    time.Now(),
+									CreatedAt:   time.Now(),
+								}
+								m.mu.Unlock()
+							}
+						}
+					}(r.ChatID, r.Peer, targetPage)
+				}
+				continue
 			}
 		} else {
 			m.mu.Lock()

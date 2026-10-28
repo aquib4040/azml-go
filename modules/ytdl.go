@@ -42,7 +42,7 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 	cfg := config.Get()
 
 	// Access control
-	if msgText, btn := ext.CheckingAccess(msg.UserID, false, cfg.BotToken, m.userMap); msgText != "" {
+	if msgText, btn := ext.CheckingAccess(msg.UserID, false, telegram.CurrentBotUsername, m.userMap); msgText != "" {
 		var markup tg.ReplyMarkupClass
 		if btn != nil {
 			markup = btn.BuildMenu(1)
@@ -85,9 +85,18 @@ func (m *YtdlModule) HandleYtdl(ctx context.Context, peer tg.InputPeerClass, msg
 		_ = os.MkdirAll(taskDir, 0777)
 	}
 
+	isFirstStatus := false
+	if m.statusMod != nil {
+		isFirstStatus = m.statusMod.ReserveStatusSlot(msg.ChatID)
+	}
+
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Fetching Media Info with yt-dlp")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
-		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		if isFirstStatus {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		} else {
+			m.sender.AutoDeleteMessage(peer, notifyID, 4)
+		}
 	}
 
 	go m.processYtdl(peer, msg, link, customQuality, taskDir, notifyID)
@@ -109,7 +118,13 @@ func (m *YtdlModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCla
 		tag, telegram.EscapeHTML(errStr), mode, elapsed)
 
 	if notifyID > 0 {
-		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		statusMsgID := 0
+		if m.statusMod != nil {
+			statusMsgID = m.statusMod.GetStatusMessageID(msg.ChatID)
+		}
+		if notifyID != statusMsgID || m.taskMgr.Count() <= 1 {
+			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		}
 	}
 	_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
 
@@ -194,12 +209,14 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		downloadedFile = renamedPath
 	}
 
-	var totalSize int64
-	if fi, sErr := os.Stat(downloadedFile); sErr == nil {
-		totalSize = fi.Size()
-		uTask.SetName(finalName)
-		uTask.SetSize(totalSize)
+	fi, sErr := os.Stat(downloadedFile)
+	if sErr != nil || fi.Size() == 0 {
+		m.sendDownloadError(ctx, peer, msg, notifyID, "Downloaded file is missing or empty (0 bytes)", "#Leech | #YtDlp", taskStartTime)
+		return
 	}
+	totalSize := fi.Size()
+	uTask.SetName(finalName)
+	uTask.SetSize(totalSize)
 	uTask.SetStatus(types.StatusUploading, "Gotd Uploader")
 
 	customThumb := ""
@@ -212,8 +229,13 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		autoThumbEnabled = true
 	}
 
+	asDoc := cfg.AsDocument
+	if user != nil {
+		asDoc = user.AsDoc
+	}
+
 	if customThumb == "" && autoThumbEnabled {
-		if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, cfg.AsDocument, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
+		if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, asDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
 			customThumb = tmdbThumb
 		}
 	}
@@ -233,10 +255,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 	if user != nil && user.DumpChatID != 0 {
 		dumpID = user.DumpChatID
 	}
-	botPM := cfg.BotPM
-	if user != nil && user.BotPM {
-		botPM = true
-	}
+	botPM := cfg.BotPM || (user != nil && user.BotPM) || (msg.ChatID != msg.UserID)
 
 	upOpt := uploader.UploadOptions{
 		FilePath:   downloadedFile,
@@ -244,7 +263,7 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		Caption:    caption,
 		ThumbPath:  thumbPath,
 		CoverPath:  coverPath,
-		AsDoc:      cfg.AsDocument,
+		AsDoc:      asDoc,
 		DumpChatID: dumpID,
 		LogChatID:  cfg.LeechLogID,
 		UserID:     msg.UserID,

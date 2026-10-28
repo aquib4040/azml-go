@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"azml-go/config"
+
 	"github.com/gotd/td/telegram/message/entity"
 	"github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/telegram/uploader"
@@ -26,6 +28,9 @@ var (
 	accessHashMu        sync.RWMutex
 	channelAccessHashes = make(map[int64]int64)
 	userAccessHashes    = make(map[int64]int64)
+
+	dumpForwardMu   sync.Mutex
+	lastDumpForward time.Time
 )
 
 func CacheChannelAccessHash(channelID, hash int64) {
@@ -41,6 +46,123 @@ func GetChannelAccessHash(channelID int64) int64 {
 	accessHashMu.RLock()
 	defer accessHashMu.RUnlock()
 	return channelAccessHashes[channelID]
+}
+
+// ResolveChannelAccessHash attempts to fetch and cache the AccessHash for a channel if not already cached.
+func ResolveChannelAccessHash(ctx context.Context, client *tg.Client, chatID int64) int64 {
+	raw := chatID
+	if raw < 0 {
+		rawStr := fmt.Sprintf("%d", raw)
+		if strings.HasPrefix(rawStr, "-100") {
+			if id, err := strconv.ParseInt(rawStr[4:], 10, 64); err == nil {
+				raw = id
+			}
+		} else if strings.HasPrefix(rawStr, "-") {
+			if id, err := strconv.ParseInt(rawStr[1:], 10, 64); err == nil {
+				raw = id
+			}
+		}
+	}
+	if hash := GetChannelAccessHash(raw); hash != 0 {
+		return hash
+	}
+	if client == nil {
+		return 0
+	}
+
+	// 1. Try MessagesGetChats first (does not require AccessHash)
+	if chats, err := client.MessagesGetChats(ctx, []int64{raw}); err == nil && chats != nil {
+		var chatList []tg.ChatClass
+		switch c := chats.(type) {
+		case *tg.MessagesChats:
+			chatList = c.Chats
+		case *tg.MessagesChatsSlice:
+			chatList = c.Chats
+		}
+		for _, chat := range chatList {
+			if ch, ok := chat.(*tg.Channel); ok && ch.ID == raw && ch.AccessHash != 0 {
+				CacheChannelAccessHash(raw, ch.AccessHash)
+				return ch.AccessHash
+			}
+		}
+	}
+
+	// 2. Try ChannelsGetChannels as fallback
+	chats, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{
+			ChannelID:  raw,
+			AccessHash: 0,
+		},
+	})
+	if err == nil && chats != nil {
+		var chatList []tg.ChatClass
+		switch c := chats.(type) {
+		case *tg.MessagesChats:
+			chatList = c.Chats
+		case *tg.MessagesChatsSlice:
+			chatList = c.Chats
+		}
+		for _, chat := range chatList {
+			if ch, ok := chat.(*tg.Channel); ok && ch.ID == raw && ch.AccessHash != 0 {
+				CacheChannelAccessHash(raw, ch.AccessHash)
+				return ch.AccessHash
+			}
+		}
+	}
+
+	return 0
+}
+
+// ForwardToChannelWithFloodWait safely forwards a message to a channel with rate limiting
+// (minimum 1500ms between forwards) and automatic retry on Telegram FLOOD_WAIT errors.
+// This prevents Telegram from flagging the bot session when multiple files are forwarded concurrently.
+func ForwardToChannelWithFloodWait(ctx context.Context, client *tg.Client, fromPeer tg.InputPeerClass, toPeer tg.InputPeerClass, msgID int) (int, error) {
+	dumpForwardMu.Lock()
+	defer dumpForwardMu.Unlock()
+
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		since := time.Since(lastDumpForward)
+		if since < 1500*time.Millisecond {
+			delay := 1500*time.Millisecond - since
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		lastDumpForward = time.Now()
+
+		fwdRes, err := client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+			FromPeer:   fromPeer,
+			ToPeer:     toPeer,
+			ID:         []int{msgID},
+			RandomID:   []int64{time.Now().UnixNano()},
+			DropAuthor: true,
+		})
+
+		if err != nil {
+			if flood, ok := tgerr.AsFloodWait(err); ok {
+				waitTime := flood + 1*time.Second
+				log.Printf("[Dump Forward] FLOOD_WAIT: sleeping %v before retry (attempt %d/%d)", waitTime, attempt+1, maxRetries)
+				select {
+				case <-time.After(waitTime):
+					continue
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}
+			return 0, fmt.Errorf("failed to forward message to channel: %w", err)
+		}
+
+		fwdMsgID := ExtractMessageID(fwdRes)
+		if fwdMsgID > 0 {
+			return fwdMsgID, nil
+		}
+		return 0, fmt.Errorf("failed to extract forwarded message ID from response")
+	}
+
+	return 0, fmt.Errorf("exceeded max retries forwarding message to channel")
 }
 
 func CacheUserAccessHash(userID, hash int64) {
@@ -265,12 +387,32 @@ func PeerToChatID(peer tg.InputPeerClass) int64 {
 	return 0
 }
 
-var botAPIHTTPClient = &http.Client{Timeout: 2 * time.Second}
+var botAPIHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+func getBotToken() string {
+	if cfg := config.Get(); cfg != nil && cfg.BotToken != "" {
+		return cfg.BotToken
+	}
+	return os.Getenv("BOT_TOKEN")
+}
 
 func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.InputPeerClass, text string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
 	if btn == nil {
 		return m.SendMessage(ctx, peer, text, replyToID, nil)
 	}
+
+	botToken := getBotToken()
+	chatID := PeerToChatID(peer)
+	if botToken != "" && chatID != 0 && btn.HasStyle() {
+		msgID, err := m.sendBotAPIMessage(ctx, botToken, chatID, text, replyToID, btn, cols)
+		if err == nil && msgID > 0 {
+			return msgID, nil
+		}
+		if err != nil {
+			log.Printf("[AZML-Go Bot API] SendMessage failed: %v, falling back to MTProto", err)
+		}
+	}
+
 	return m.SendMessage(ctx, peer, text, replyToID, btn.BuildMenu(cols))
 }
 
@@ -281,7 +423,140 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 	if btn == nil {
 		return m.EditMessage(ctx, peer, msgID, text, nil)
 	}
+
+	botToken := getBotToken()
+	chatID := PeerToChatID(peer)
+	if botToken != "" && chatID != 0 && btn.HasStyle() {
+		err := m.editBotAPIMessage(ctx, botToken, chatID, msgID, text, btn, cols)
+		if err == nil {
+			return nil
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "message to edit not found") {
+			return err
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "too many requests") {
+			return err
+		}
+		log.Printf("[AZML-Go Bot API] EditMessage failed: %v, falling back to MTProto", err)
+	}
+
 	return m.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(cols))
+}
+
+func (m *MessageSender) sendBotAPIMessage(ctx context.Context, botToken string, chatID int64, text string, replyToID int, btn *ButtonMaker, cols int) (int, error) {
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "HTML",
+	}
+	if replyToID != 0 {
+		payload["reply_to_message_id"] = replyToID
+	}
+	if btn != nil {
+		payload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := botAPIHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Ok          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			MessageID int `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return 0, err
+	}
+	if !res.Ok {
+		return 0, fmt.Errorf("bot api error: %s", res.Description)
+	}
+	return res.Result.MessageID, nil
+}
+
+func (m *MessageSender) editBotAPIMessage(ctx context.Context, botToken string, chatID int64, msgID int, text string, btn *ButtonMaker, cols int) error {
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"message_id": msgID,
+		"text":       text,
+		"parse_mode": "HTML",
+	}
+	if btn != nil {
+		payload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := botAPIHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Ok          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return err
+	}
+	if res.Ok || strings.Contains(res.Description, "message is not modified") {
+		return nil
+	}
+
+	// If the message is a photo/media message, edit caption instead
+	if strings.Contains(res.Description, "there is no text in the message to edit") {
+		capPayload := map[string]interface{}{
+			"chat_id":    chatID,
+			"message_id": msgID,
+			"caption":    text,
+			"parse_mode": "HTML",
+		}
+		if btn != nil {
+			capPayload["reply_markup"] = json.RawMessage(btn.BuildBotAPIKeyboard(cols))
+		}
+		capBody, _ := json.Marshal(capPayload)
+		capReq, cErr := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken), bytes.NewReader(capBody))
+		if cErr == nil {
+			capReq.Header.Set("Content-Type", "application/json")
+			if capResp, doErr := botAPIHTTPClient.Do(capReq); doErr == nil {
+				defer capResp.Body.Close()
+				var capRes struct {
+					Ok          bool   `json:"ok"`
+					Description string `json:"description"`
+				}
+				if json.NewDecoder(capResp.Body).Decode(&capRes) == nil && (capRes.Ok || strings.Contains(capRes.Description, "message is not modified")) {
+					return nil
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("bot api error: %s", res.Description)
 }
 
 // DeleteMessage deletes messages for both PMs/basic groups and supergroups/channels
@@ -503,17 +778,13 @@ func FetchMessage(ctx context.Context, rawClient *tg.Client, peer tg.InputPeerCl
 		if hash == 0 {
 			hash = GetChannelAccessHash(pChan.ChannelID)
 		}
-		if hash != 0 {
-			res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-				Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
-				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
-			})
+		if hash == 0 {
+			return nil, fmt.Errorf("channel access hash unknown for %d", pChan.ChannelID)
 		}
-		if err != nil || hash == 0 {
-			res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
-				&tg.InputMessageID{ID: msgID},
-			})
-		}
+		res, err = rawClient.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: &tg.InputChannel{ChannelID: pChan.ChannelID, AccessHash: hash},
+			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+		})
 	} else {
 		res, err = rawClient.MessagesGetMessages(ctx, []tg.InputMessageClass{
 			&tg.InputMessageID{ID: msgID},

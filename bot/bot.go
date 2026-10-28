@@ -17,6 +17,7 @@ import (
 	"azml-go/config"
 	"azml-go/helper/downloader"
 	"azml-go/helper/ext"
+	"azml-go/helper/pool"
 	"azml-go/helper/telegram"
 	"azml-go/helper/uploader"
 	"azml-go/types"
@@ -43,6 +44,7 @@ type BotApp struct {
 	sender      *telegram.MessageSender
 	uploader    *uploader.TelegramUploader
 	userMap     *types.SafeUserMap
+	sessPool    *pool.SessionPool
 	startTime   time.Time
 	botUsername string
 
@@ -50,7 +52,7 @@ type BotApp struct {
 	leechHandler          func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool)
 	ytdlHandler           func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	statusHandler         func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
-	statusCbHandler       func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string)
+	statusCbHandler       func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
 	cancelHandler         func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelAllHandler      func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)
 	cancelCbHandler       func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)
@@ -221,7 +223,7 @@ func (b *BotApp) SetLeechHandler(h func(ctx context.Context, peer tg.InputPeerCl
 func (b *BotApp) SetYtdlHandler(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
 	b.ytdlHandler = h
 }
-func (b *BotApp) SetStatusHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string)) {
+func (b *BotApp) SetStatusHandlers(h func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext), cb func(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64)) {
 	b.statusHandler = h
 	b.statusCbHandler = cb
 }
@@ -283,10 +285,13 @@ func (b *BotApp) SetSelectHandlers(mega, gd func(ctx context.Context, peer tg.In
 	b.gdSelectCbHandler = gd
 }
 func (b *BotApp) GetRawAPI() *tg.Client                   { return b.rawAPI }
+func (b *BotApp) GetUserRawAPI() *tg.Client               { return b.userRawAPI }
 func (b *BotApp) GetSender() *telegram.MessageSender      { return b.sender }
 func (b *BotApp) GetUploader() *uploader.TelegramUploader { return b.uploader }
 func (b *BotApp) GetUserMap() *types.SafeUserMap          { return b.userMap }
 func (b *BotApp) GetStartTime() time.Time                 { return b.startTime }
+func (b *BotApp) SetSessionPool(p *pool.SessionPool)      { b.sessPool = p }
+func (b *BotApp) GetSessionPool() *pool.SessionPool       { return b.sessPool }
 
 func (b *BotApp) registerDispatcher() {
 	b.dispatcher.OnNewMessage(func(ctx context.Context, e tg.Entities, update *tg.UpdateNewMessage) error {
@@ -366,7 +371,9 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 		if !u.StartedInPM {
 			u.StartedInPM = true
 			b.userMap.Set(u)
-			_ = ext.DB.SaveUser(u)
+			go func(usr *types.UserSettings) {
+				_ = ext.DB.SaveUser(usr)
+			}(u)
 		}
 	}
 
@@ -480,32 +487,31 @@ func (b *BotApp) routeMessage(ctx context.Context, m *tg.Message, entities tg.En
 				msgCtx.RawMedia = header.ReplyMedia
 			}
 
-			// 2. Target peer (handles channel posts in discussion groups / comments)
-			targetPeer := peer
-			if header.ReplyToPeerID != nil {
-				if rPeer := b.getPeerWithEntities(header.ReplyToPeerID, entities); rPeer != nil {
-					targetPeer = rPeer
-				}
-			}
-
-			// 3. Populate replied message text and media with quick 2s timeout
-			fetchCtx, fetchCancel := context.WithTimeout(ctx, 2*time.Second)
-			if repliedMsg, err := telegram.FetchMessage(fetchCtx, b.rawAPI, targetPeer, msgCtx.ReplyToID); err == nil && repliedMsg != nil {
-				msgCtx.ReplyText = repliedMsg.Message
-				if repliedMsg.Media != nil {
-					msgCtx.HasMedia = true
-					msgCtx.RawMedia = repliedMsg.Media
-				}
-			} else if targetPeer != peer {
-				if rMsg, rErr := telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID); rErr == nil && rMsg != nil {
-					msgCtx.ReplyText = rMsg.Message
-					if rMsg.Media != nil {
-						msgCtx.HasMedia = true
-						msgCtx.RawMedia = rMsg.Media
+			// 2. Fetch replied message directly from this chat with generous timeout (8s) so concurrent tasks never miss media
+			if msgCtx.RawMedia == nil {
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, 8*time.Second)
+				var repliedMsg *tg.Message
+				for attempt := 0; attempt < 3; attempt++ {
+					var err error
+					repliedMsg, err = telegram.FetchMessage(fetchCtx, b.rawAPI, peer, msgCtx.ReplyToID)
+					if err == nil && repliedMsg != nil {
+						break
+					}
+					select {
+					case <-fetchCtx.Done():
+						break
+					case <-time.After(250 * time.Millisecond):
 					}
 				}
+				if repliedMsg != nil {
+					msgCtx.ReplyText = repliedMsg.Message
+					if repliedMsg.Media != nil {
+						msgCtx.HasMedia = true
+						msgCtx.RawMedia = repliedMsg.Media
+					}
+				}
+				fetchCancel()
 			}
-			fetchCancel()
 		}
 	}
 
@@ -695,7 +701,7 @@ func (b *BotApp) routeCallback(ctx context.Context, cb *tg.UpdateBotCallbackQuer
 		}
 	case strings.HasPrefix(data, "status"):
 		if b.statusCbHandler != nil {
-			b.statusCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data)
+			b.statusCbHandler(ctx, peer, cb.QueryID, cb.MsgID, data, cb.UserID)
 		}
 	case strings.HasPrefix(data, "canall"):
 		if b.cancelCbHandler != nil {
@@ -856,7 +862,7 @@ func (b *BotApp) sendStartupNotification(ctx context.Context) {
 		}
 	}
 
-	// 2. Otherwise send Bot Started Successfully notification to OWNER_ID and LEECH_LOG_ID
+	// 2. Otherwise send Bot Started Successfully notification to Authorized Chats (GC) or Owner
 	startMsg := fmt.Sprintf("⌬ <b><i>Bot Started Successfully!</i></b>\n"+
 		"┠ <b>Date:</b> %s\n"+
 		"┠ <b>Time:</b> %s\n"+
@@ -903,9 +909,18 @@ func (b *BotApp) sendStartupNotification(ctx context.Context) {
 		}
 	}
 
-	log.Printf("[AZML-Go Bot Client] Triggering startup notification (LeechLog: %d)...", cfg.LeechLogID)
-	if cfg.LeechLogID != 0 {
-		sendViaBotAPI(cfg.LeechLogID)
+	log.Printf("[AZML-Go Bot Client] Triggering startup notification...")
+	sentToAny := false
+	for _, chatID := range cfg.AuthorizedChats {
+		if chatID != 0 {
+			log.Printf("[AZML-Go Bot Client] Sending startup notification to Authorized Group/Chat: %d", chatID)
+			sendViaBotAPI(chatID)
+			sentToAny = true
+		}
+	}
+	if !sentToAny && cfg.OwnerID != 0 {
+		log.Printf("[AZML-Go Bot Client] No authorized chats configured; sending startup notification to Owner: %d", cfg.OwnerID)
+		sendViaBotAPI(cfg.OwnerID)
 	}
 }
 
@@ -1095,6 +1110,26 @@ func getPeerID(p tg.PeerClass) int64 {
 	return 0
 }
 
+func (b *BotApp) getPeerForChatID(chatID int64) tg.InputPeerClass {
+	if chatID > 0 {
+		accessHashMu.RLock()
+		hash := userAccessHashes[chatID]
+		accessHashMu.RUnlock()
+		if hash == 0 {
+			hash = telegram.GetUserAccessHash(chatID)
+		}
+		return &tg.InputPeerUser{UserID: chatID, AccessHash: hash}
+	}
+	rawChanID := pool.RawChannelID(chatID)
+	accessHashMu.RLock()
+	hash := channelAccessHashes[rawChanID]
+	accessHashMu.RUnlock()
+	if hash == 0 {
+		hash = telegram.GetChannelAccessHash(rawChanID)
+	}
+	return &tg.InputPeerChannel{ChannelID: rawChanID, AccessHash: hash}
+}
+
 func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m *tg.Message, senderID, chatID int64) bool {
 	// Case 1: Document media
 	if docMedia, ok := m.Media.(*tg.MessageMediaDocument); ok {
@@ -1209,9 +1244,10 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 			}
 
 			// 1B. Custom Thumbnail document
-			if strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") {
+			isImageDoc := strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") || strings.HasSuffix(lowerName, ".png") || strings.HasSuffix(lowerName, ".webp") || strings.HasPrefix(doc.MimeType, "image/")
+			if isImageDoc {
 				caption := strings.ToLower(strings.TrimSpace(m.Message))
-				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
+				isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb") || strings.HasPrefix(caption, "/t") || strings.HasPrefix(caption, "/thumb")
 				sess, isPending := ext.GetPendingThumbSession(senderID, chatID)
 				if isThumbCmd || (isPending && sess != nil && !strings.HasPrefix(caption, "/")) {
 					ext.ClearPendingThumbSession(senderID)
@@ -1226,17 +1262,18 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 							u.CustomThumb = destThumb
 							_ = ext.DB.SaveUser(u)
 
-							inMsgID := m.ID
-							go func() {
-								delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-								defer cancel()
-								_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
-							}()
+							// Always send immediate confirmation to user in current chat
+							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
 
+							// Refresh interactive /us settings menu if prompt was active
 							if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
-								b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
-							} else {
-								_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+								settingsPeer := peer
+								if sess.ChatID != 0 && sess.ChatID != chatID {
+									if p := b.getPeerForChatID(sess.ChatID); p != nil {
+										settingsPeer = p
+									}
+								}
+								b.settingsUpdateHandler(ctx, settingsPeer, sess.PromptMsgID, u, "thumb")
 							}
 							return true
 						}
@@ -1270,10 +1307,10 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 		}
 	}
 
-	// Case 2: Photo media (Custom thumbnail for user only if requested)
+	// Case 2: Photo media (Custom thumbnail for user)
 	if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 		caption := strings.ToLower(strings.TrimSpace(m.Message))
-		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb")
+		isThumbCmd := strings.HasPrefix(caption, "/us thumb") || strings.HasPrefix(caption, "/setthumb") || strings.HasPrefix(caption, "/usersetting thumb") || strings.HasPrefix(caption, "/t") || strings.HasPrefix(caption, "/thumb")
 		sess, isPending := ext.GetPendingThumbSession(senderID, chatID)
 		if isThumbCmd || (isPending && sess != nil && !strings.HasPrefix(caption, "/")) {
 			ext.ClearPendingThumbSession(senderID)
@@ -1298,17 +1335,18 @@ func (b *BotApp) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass
 						u.CustomThumb = destThumb
 						_ = ext.DB.SaveUser(u)
 
-						inMsgID := m.ID
-						go func() {
-							delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-							defer cancel()
-							_ = b.sender.DeleteMessage(delCtx, peer, []int{inMsgID})
-						}()
+						// Always send immediate confirmation to user in current chat
+						_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
 
+						// Refresh interactive /us settings menu if prompt was active
 						if sess != nil && sess.PromptMsgID > 0 && b.settingsUpdateHandler != nil {
-							b.settingsUpdateHandler(ctx, peer, sess.PromptMsgID, u, "thumb")
-						} else {
-							_, _ = b.sender.SendMessage(ctx, peer, "✓ <b>Custom thumbnail saved!</b> It will be attached to all your future leeched files.", m.ID, nil)
+							settingsPeer := peer
+							if sess.ChatID != 0 && sess.ChatID != chatID {
+								if p := b.getPeerForChatID(sess.ChatID); p != nil {
+									settingsPeer = p
+								}
+							}
+							b.settingsUpdateHandler(ctx, settingsPeer, sess.PromptMsgID, u, "thumb")
 						}
 						return true
 					}

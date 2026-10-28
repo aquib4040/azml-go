@@ -32,12 +32,46 @@ var (
 	GlobalTaskManager *TaskManager
 	taskOnce          sync.Once
 
-	queuedDL    = make(map[string]chan struct{})
-	queuedUP    = make(map[string]chan struct{})
-	nonQueuedDL = make(map[string]struct{})
-	nonQueuedUP = make(map[string]struct{})
-	queueLock   sync.Mutex
+	queuedDL      = make(map[string]chan struct{})
+	queuedUP      = make(map[string]chan struct{})
+	queuedDLOrder []string
+	queuedUPOrder []string
+	nonQueuedDL   = make(map[string]struct{})
+	nonQueuedUP   = make(map[string]struct{})
+	queueLock     sync.Mutex
 )
+
+func popNextQueuedDL() (string, chan struct{}, bool) {
+	for len(queuedDLOrder) > 0 {
+		uid := queuedDLOrder[0]
+		queuedDLOrder = queuedDLOrder[1:]
+		if ch, ok := queuedDL[uid]; ok {
+			delete(queuedDL, uid)
+			return uid, ch, true
+		}
+	}
+	for uid, ch := range queuedDL {
+		delete(queuedDL, uid)
+		return uid, ch, true
+	}
+	return "", nil, false
+}
+
+func popNextQueuedUP() (string, chan struct{}, bool) {
+	for len(queuedUPOrder) > 0 {
+		uid := queuedUPOrder[0]
+		queuedUPOrder = queuedUPOrder[1:]
+		if ch, ok := queuedUP[uid]; ok {
+			delete(queuedUP, uid)
+			return uid, ch, true
+		}
+	}
+	for uid, ch := range queuedUP {
+		delete(queuedUP, uid)
+		return uid, ch, true
+	}
+	return "", nil, false
+}
 
 func GetTaskManager() *TaskManager {
 	taskOnce.Do(func() {
@@ -498,6 +532,7 @@ func AcquireDownloadQueue(ctx context.Context, uid, name string, size int64, cha
 		queued = true
 		waitChan = make(chan struct{})
 		queuedDL[uid] = waitChan
+		queuedDLOrder = append(queuedDLOrder, uid)
 	} else {
 		nonQueuedDL[uid] = struct{}{}
 	}
@@ -505,13 +540,23 @@ func AcquireDownloadQueue(ctx context.Context, uid, name string, size int64, cha
 
 	if queued {
 		log.Printf("[Queue] Task added to QueueDL: %s (UID: %s)", name, uid)
-		qTask := NewQueueTask(uid, name, size, types.StatusQueuedDL, chatID, userID, msgID, cancelFn)
-		GetTaskManager().AddTask(qTask)
+		if existing := GetTaskManager().GetTask(uid); existing != nil {
+			if u, ok := existing.(*UnifiedTask); ok {
+				u.SetStatus(types.StatusQueuedDL, "Sleep v0")
+			}
+		} else {
+			qTask := NewQueueTask(uid, name, size, types.StatusQueuedDL, chatID, userID, msgID, cancelFn)
+			GetTaskManager().AddTask(qTask)
+		}
 
 		select {
 		case <-waitChan:
 			log.Printf("[Queue] Task woken up from QueueDL: %s (UID: %s)", name, uid)
-			GetTaskManager().RemoveTask(uid)
+			if existing := GetTaskManager().GetTask(uid); existing != nil {
+				if u, ok := existing.(*UnifiedTask); ok {
+					u.SetStatus(types.StatusDownloading, "Telegram MTProto")
+				}
+			}
 			return true, nil
 		case <-ctx.Done():
 			queueLock.Lock()
@@ -555,6 +600,7 @@ func AcquireUploadQueue(ctx context.Context, uid, name string, size int64, chatI
 		queued = true
 		waitChan = make(chan struct{})
 		queuedUP[uid] = waitChan
+		queuedUPOrder = append(queuedUPOrder, uid)
 	} else {
 		nonQueuedUP[uid] = struct{}{}
 	}
@@ -562,13 +608,23 @@ func AcquireUploadQueue(ctx context.Context, uid, name string, size int64, chatI
 
 	if queued {
 		log.Printf("[Queue] Task added to QueueUp: %s (UID: %s)", name, uid)
-		qTask := NewQueueTask(uid, name, size, types.StatusQueuedUP, chatID, userID, msgID, cancelFn)
-		GetTaskManager().AddTask(qTask)
+		if existing := GetTaskManager().GetTask(uid); existing != nil {
+			if u, ok := existing.(*UnifiedTask); ok {
+				u.SetStatus(types.StatusQueuedUP, "Sleep v0")
+			}
+		} else {
+			qTask := NewQueueTask(uid, name, size, types.StatusQueuedUP, chatID, userID, msgID, cancelFn)
+			GetTaskManager().AddTask(qTask)
+		}
 
 		select {
 		case <-waitChan:
 			log.Printf("[Queue] Task woken up from QueueUp: %s (UID: %s)", name, uid)
-			GetTaskManager().RemoveTask(uid)
+			if existing := GetTaskManager().GetTask(uid); existing != nil {
+				if u, ok := existing.(*UnifiedTask); ok {
+					u.SetStatus(types.StatusUploading, "MTProto")
+				}
+			}
 			return true, nil
 		case <-ctx.Done():
 			queueLock.Lock()
@@ -629,30 +685,26 @@ func StartFromQueued() {
 		if all < allLimit {
 			fTasks := allLimit - all
 			// Priority to uploads first (same as Python AZML)
-			if len(queuedUP) > 0 && (upLimit == 0 || up < upLimit) {
-				for uid, ch := range queuedUP {
-					delete(queuedUP, uid)
-					nonQueuedUP[uid] = struct{}{}
-					close(ch)
-					up++
-					fTasks--
-					if fTasks == 0 || (upLimit > 0 && up >= upLimit) {
-						break
-					}
+			for len(queuedUP) > 0 && (upLimit == 0 || up < upLimit) && fTasks > 0 {
+				uid, ch, ok := popNextQueuedUP()
+				if !ok {
+					break
 				}
+				nonQueuedUP[uid] = struct{}{}
+				close(ch)
+				up++
+				fTasks--
 			}
 			// Then downloads
-			if len(queuedDL) > 0 && (dlLimit == 0 || dl < dlLimit) && fTasks > 0 {
-				for uid, ch := range queuedDL {
-					delete(queuedDL, uid)
-					nonQueuedDL[uid] = struct{}{}
-					close(ch)
-					dl++
-					fTasks--
-					if (dlLimit > 0 && dl >= dlLimit) || fTasks == 0 {
-						break
-					}
+			for len(queuedDL) > 0 && (dlLimit == 0 || dl < dlLimit) && fTasks > 0 {
+				uid, ch, ok := popNextQueuedDL()
+				if !ok {
+					break
 				}
+				nonQueuedDL[uid] = struct{}{}
+				close(ch)
+				dl++
+				fTasks--
 			}
 		}
 		return
@@ -660,22 +712,21 @@ func StartFromQueued() {
 
 	// No allLimit: independent upload queue
 	if upLimit > 0 {
-		if len(queuedUP) > 0 && up < upLimit {
-			fTasks := upLimit - up
-			for uid, ch := range queuedUP {
-				delete(queuedUP, uid)
-				nonQueuedUP[uid] = struct{}{}
-				close(ch)
-				up++
-				fTasks--
-				if fTasks == 0 {
-					break
-				}
+		for len(queuedUP) > 0 && up < upLimit {
+			uid, ch, ok := popNextQueuedUP()
+			if !ok {
+				break
 			}
+			nonQueuedUP[uid] = struct{}{}
+			close(ch)
+			up++
 		}
 	} else {
-		for uid, ch := range queuedUP {
-			delete(queuedUP, uid)
+		for {
+			uid, ch, ok := popNextQueuedUP()
+			if !ok {
+				break
+			}
 			nonQueuedUP[uid] = struct{}{}
 			close(ch)
 		}
@@ -683,22 +734,21 @@ func StartFromQueued() {
 
 	// Independent download queue
 	if dlLimit > 0 {
-		if len(queuedDL) > 0 && dl < dlLimit {
-			fTasks := dlLimit - dl
-			for uid, ch := range queuedDL {
-				delete(queuedDL, uid)
-				nonQueuedDL[uid] = struct{}{}
-				close(ch)
-				dl++
-				fTasks--
-				if fTasks == 0 {
-					break
-				}
+		for len(queuedDL) > 0 && dl < dlLimit {
+			uid, ch, ok := popNextQueuedDL()
+			if !ok {
+				break
 			}
+			nonQueuedDL[uid] = struct{}{}
+			close(ch)
+			dl++
 		}
 	} else {
-		for uid, ch := range queuedDL {
-			delete(queuedDL, uid)
+		for {
+			uid, ch, ok := popNextQueuedDL()
+			if !ok {
+				break
+			}
 			nonQueuedDL[uid] = struct{}{}
 			close(ch)
 		}

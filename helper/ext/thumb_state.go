@@ -44,7 +44,8 @@ func IsPendingThumbSession(userID int64, chatID ...int64) bool {
 		return false
 	}
 	if len(chatID) > 0 && chatID[0] != 0 && sess.ChatID != 0 {
-		if sess.ChatID != chatID[0] {
+		// If sent in user PM (chatID == userID), always accept
+		if chatID[0] != userID && sess.ChatID != chatID[0] {
 			return false
 		}
 	}
@@ -64,7 +65,8 @@ func GetPendingThumbSession(userID int64, chatID ...int64) (*PendingThumbSession
 		return nil, false
 	}
 	if len(chatID) > 0 && chatID[0] != 0 && sess.ChatID != 0 {
-		if sess.ChatID != chatID[0] {
+		// If sent in user PM (chatID == userID), always accept
+		if chatID[0] != userID && sess.ChatID != chatID[0] {
 			return nil, false
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"azml-go/config"
@@ -33,10 +34,66 @@ var (
 		"Anime-Supreme", "HiSub", "NC-Raws", "nekomoe kissaten",
 	}
 
-	seasonRegex = regexp.MustCompile(`(?i)[Ss](?:eason[\s\.\-]*)?0*(\d+)`)
-	qualRegex   = regexp.MustCompile(`(?i)(\d{3,4}[pP]|4K|2160[pP])`)
-	mathOffset  = regexp.MustCompile(`\{(episode|season):([+\-])(\d+)\}`)
+	uploaderTagRegexes []*regexp.Regexp
+	titlePatterns      []*regexp.Regexp
+	epPatterns         []*regexp.Regexp
+	yearRegex          = regexp.MustCompile(`(?i)\s*[\(\[]?\s*(199[0-9]|20[0-2][0-9]|2030)\s*[\)\]]?\s*`)
+	seasonRegex        = regexp.MustCompile(`(?i)[Ss](?:eason[\s\.\-]*)?0*(\d+)`)
+	qualRegex          = regexp.MustCompile(`(?i)(\d{3,4}[pP]|4K|2160[pP])`)
+	mathOffset         = regexp.MustCompile(`\{(episode|season):([+\-])(\d+)\}`)
+
+	regexCache   = make(map[string]*regexp.Regexp)
+	regexCacheMu sync.RWMutex
 )
+
+func init() {
+	for _, tag := range uploaderTags {
+		uploaderTagRegexes = append(uploaderTagRegexes, regexp.MustCompile(`(?i)^\[`+regexp.QuoteMeta(tag)+`\]\s*`))
+	}
+
+	titlePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^\[[Ee]p?(?:isode)?[\s\.\-]*0*\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:\[|@|$)`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]0*(\d+)[\s\.\-]*[Ee]0*(\d+)`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]eason[\s\.\-]*0*(\d+)[\s\.\-]*[Ee]pisode[\s\.\-]*0*(\d+)`),
+		regexp.MustCompile(`(?i)^\[CH[-\s]?\d+\][\s\.\-]*(.+?)[\s\.\-]*-`),
+		regexp.MustCompile(`(?i)^\[\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:@|$)`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*(?:Ch(?:apter)?|#)[\s\.\-]*\d+`),
+		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*\[`),
+	}
+
+	epPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})v\d+`),
+		regexp.MustCompile(`(?i)\[[Ee]p?(?:isode)?[\s\.\-]*0*(\d{1,4})\]`),
+		regexp.MustCompile(`(?i)[Ss]0*(\d+)[Ee]0*(\d+)`),
+		regexp.MustCompile(`(?i)[Ee]p(?:isode)?[\s\.\-]*0*(\d{1,4})`),
+		regexp.MustCompile(`(?i)[Ee][\s\.\-]*0*(\d{1,4})`),
+		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})`),
+		regexp.MustCompile(`(?i)[\s\.\-]+0*(\d{1,4})[\s\.\-]+\d{3,4}[pP]`),
+		regexp.MustCompile(`(?i)\[0*(\d{1,4})\]`),
+	}
+}
+
+func getCompiledRegex(pat string) (*regexp.Regexp, error) {
+	regexCacheMu.RLock()
+	re, ok := regexCache[pat]
+	regexCacheMu.RUnlock()
+	if ok {
+		return re, nil
+	}
+
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return nil, err
+	}
+
+	regexCacheMu.Lock()
+	if len(regexCache) > 500 {
+		regexCache = make(map[string]*regexp.Regexp)
+	}
+	regexCache[pat] = re
+	regexCacheMu.Unlock()
+	return re, nil
+}
 
 type ExtractedMeta struct {
 	Title   string
@@ -56,25 +113,15 @@ func ExtractMetadataFromFilename(filename string) ExtractedMeta {
 	}
 
 	clean := filename
-	for _, tag := range uploaderTags {
-		clean = regexp.MustCompile(`(?i)^\[`+regexp.QuoteMeta(tag)+`\]\s*`).ReplaceAllString(clean, "")
+	for _, re := range uploaderTagRegexes {
+		clean = re.ReplaceAllString(clean, "")
 	}
 	clean = strings.TrimSpace(clean)
-
-	titlePatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^\[[Ee]p?(?:isode)?[\s\.\-]*0*\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:\[|@|$)`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]0*(\d+)[\s\.\-]*[Ee]0*(\d+)`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*[Ss]eason[\s\.\-]*0*(\d+)[\s\.\-]*[Ee]pisode[\s\.\-]*0*(\d+)`),
-		regexp.MustCompile(`(?i)^\[CH[-\s]?\d+\][\s\.\-]*(.+?)[\s\.\-]*-`),
-		regexp.MustCompile(`(?i)^\[\d+\][\s\.\-]*(.+?)[\s\.\-]*(?:@|$)`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*(?:Ch(?:apter)?|#)[\s\.\-]*\d+`),
-		regexp.MustCompile(`(?i)^(.+?)[\s\.\-]*\[`),
-	}
 
 	for _, p := range titlePatterns {
 		if m := p.FindStringSubmatch(clean); len(m) > 1 {
 			title := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(m[1], ".", " "), "-", " "))
-			title = regexp.MustCompile(`(?i)\s*[\(\[]?\s*(199[0-9]|20[0-2][0-9]|2030)\s*[\)\]]?\s*`).ReplaceAllString(title, " ")
+			title = yearRegex.ReplaceAllString(title, " ")
 			meta.Title = strings.TrimSpace(title)
 			if len(m) >= 4 {
 				meta.Season = fmt.Sprintf("%02d", mustAtoi(m[2]))
@@ -86,17 +133,6 @@ func ExtractMetadataFromFilename(filename string) ExtractedMeta {
 
 	if sm := seasonRegex.FindStringSubmatch(filename); len(sm) > 1 {
 		meta.Season = fmt.Sprintf("%02d", mustAtoi(sm[1]))
-	}
-
-	epPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})v\d+`),
-		regexp.MustCompile(`(?i)\[[Ee]p?(?:isode)?[\s\.\-]*0*(\d{1,4})\]`),
-		regexp.MustCompile(`(?i)[Ss]0*(\d+)[Ee]0*(\d+)`),
-		regexp.MustCompile(`(?i)[Ee]p(?:isode)?[\s\.\-]*0*(\d{1,4})`),
-		regexp.MustCompile(`(?i)[Ee][\s\.\-]*0*(\d{1,4})`),
-		regexp.MustCompile(`(?i)[\s\.\-]+-[\s\.\-]*0*(\d{1,4})`),
-		regexp.MustCompile(`(?i)[\s\.\-]+0*(\d{1,4})[\s\.\-]+\d{3,4}[pP]`),
-		regexp.MustCompile(`(?i)\[0*(\d{1,4})\]`),
 	}
 
 	for _, ep := range epPatterns {
@@ -223,9 +259,17 @@ func FormatFilename(filename string, user *types.UserSettings, filePath string) 
 		formatted = base + suffix + ext
 	}
 
-	if filepath.Ext(formatted) == "" && filePath != "" {
+	if filePath != "" {
+		currentExt := filepath.Ext(formatted)
 		if detectedExt := DetectExtension(filePath); detectedExt != "" {
-			formatted += detectedExt
+			if currentExt == "" {
+				formatted += detectedExt
+			} else if (detectedExt == ".mkv" && strings.EqualFold(currentExt, ".mp4")) ||
+				(detectedExt == ".webm" && strings.EqualFold(currentExt, ".mp4")) ||
+				(detectedExt == ".mp4" && strings.EqualFold(currentExt, ".mkv")) {
+				// Prevent container-extension mismatch which corrupts media parsing and previews
+				formatted = strings.TrimSuffix(formatted, currentExt) + detectedExt
+			}
 		}
 	}
 
@@ -356,7 +400,7 @@ func applyRegexRemname(filename, rules string) string {
 		if len(args) >= 2 {
 			pat := args[0]
 			rep := args[1]
-			re, err := regexp.Compile(pat)
+			re, err := getCompiledRegex(pat)
 			if err == nil {
 				if len(args) == 3 {
 					count := mustAtoi(args[2])
@@ -370,7 +414,7 @@ func applyRegexRemname(filename, rules string) string {
 				}
 			}
 		} else if len(args) == 1 && args[0] != "" {
-			re, err := regexp.Compile(args[0])
+			re, err := getCompiledRegex(args[0])
 			if err == nil {
 				base = re.ReplaceAllString(base, "")
 			}
@@ -379,25 +423,61 @@ func applyRegexRemname(filename, rules string) string {
 	return base + ext
 }
 
-func SplitFile(filePath string, maxSplitSize int64, outDir string) ([]string, error) {
+func isVideoExtension(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts":
+		return true
+	}
+	return false
+}
+
+func SplitFile(filePath string, maxSplitSize int64, outDir string, equalSplits bool) ([]string, error) {
 	_ = os.MkdirAll(outDir, 0755)
 	fi, err := os.Stat(filePath)
 	if err != nil {
 		return nil, err
 	}
-	if fi.Size() <= maxSplitSize {
+	fileSize := fi.Size()
+	if fileSize <= maxSplitSize {
 		return []string{filePath}, nil
 	}
 
-	details, probeErr := ProbeMedia(filePath)
-	if probeErr == nil && details.Duration > 5 {
-		partsCount := int(fi.Size()/maxSplitSize) + 1
-		partDuration := details.Duration / partsCount
-		var parts []string
-		ext := filepath.Ext(filePath)
-		base := strings.TrimSuffix(filepath.Base(filePath), ext)
+	// Safety margin of 5MB so Telegram never rejects with FILE_TOO_BIG (under 2GB / 4GB)
+	splitSize := maxSplitSize - (5 * 1024 * 1024)
+	if splitSize <= 0 {
+		splitSize = maxSplitSize
+	}
 
-		for i := 0; i < partsCount; i++ {
+	partsCount := int((fileSize + maxSplitSize - 1) / maxSplitSize)
+	if equalSplits && partsCount > 1 {
+		splitSize = (fileSize + int64(partsCount) - 1) / int64(partsCount) + 1024
+	}
+
+	extName := strings.ToLower(filepath.Ext(filePath))
+	details, probeErr := ProbeMedia(filePath)
+	if probeErr == nil && details.Duration > 5 && isVideoExtension(extName) {
+		parts, vErr := splitVideo(filePath, fileSize, splitSize, details.Duration, outDir, partsCount, equalSplits)
+		if vErr == nil && len(parts) > 1 {
+			return parts, nil
+		}
+		// If video split failed, clean up any partial files and fallback to binary split
+		for _, p := range parts {
+			_ = os.Remove(p)
+		}
+	}
+
+	return splitBinary(filePath, splitSize, outDir)
+}
+
+func splitVideo(filePath string, totalSize int64, splitSize int64, duration int, outDir string, expectedParts int, equalSplits bool) ([]string, error) {
+	var parts []string
+	ext := filepath.Ext(filePath)
+	base := strings.TrimSuffix(filepath.Base(filePath), ext)
+
+	// Equal duration split branch (only when EqualSplits is explicitly requested)
+	if equalSplits && expectedParts > 1 {
+		partDuration := duration / expectedParts
+		for i := 0; i < expectedParts; i++ {
 			partPath := filepath.Join(outDir, fmt.Sprintf("%s.part%03d%s", base, i+1, ext))
 			start := i * partDuration
 			cmd := exec.Command("ffmpeg",
@@ -413,12 +493,94 @@ func SplitFile(filePath string, maxSplitSize int64, outDir string) ([]string, er
 				parts = append(parts, partPath)
 			}
 		}
-		if len(parts) > 0 {
+		if len(parts) > 1 {
 			return parts, nil
 		}
+		for _, p := range parts {
+			_ = os.Remove(p)
+		}
+		parts = nil
 	}
 
-	return splitBinary(filePath, maxSplitSize, outDir)
+	// Default branch: Size-based split (-fs splitSize) like AZML
+	// Part 1 fills up to ~2GB (splitSize), and Part 2 gets the remaining ~40MB
+	startTime := 0
+	partIdx := 1
+	maxLoops := expectedParts + 5 // safety limit
+
+	for (partIdx <= expectedParts || startTime < duration-4) && partIdx <= maxLoops {
+		partPath := filepath.Join(outDir, fmt.Sprintf("%s.part%03d%s", base, partIdx, ext))
+		_ = os.Remove(partPath)
+
+		// Try with -map 0 first (preserves all audio/subtitle streams like AZML)
+		cmd := exec.Command("ffmpeg",
+			"-hide_banner", "-loglevel", "error",
+			"-ss", strconv.Itoa(startTime),
+			"-i", filePath,
+			"-fs", strconv.FormatInt(splitSize, 10),
+			"-map", "0",
+			"-map_chapters", "-1",
+			"-async", "1",
+			"-strict", "-2",
+			"-c", "copy",
+			partPath, "-y",
+		)
+		err := cmd.Run()
+		if err != nil {
+			// If -map 0 failed, retry without -map 0
+			_ = os.Remove(partPath)
+			cmdRetry := exec.Command("ffmpeg",
+				"-hide_banner", "-loglevel", "error",
+				"-ss", strconv.Itoa(startTime),
+				"-i", filePath,
+				"-fs", strconv.FormatInt(splitSize, 10),
+				"-map_chapters", "-1",
+				"-async", "1",
+				"-strict", "-2",
+				"-c", "copy",
+				partPath, "-y",
+			)
+			if rErr := cmdRetry.Run(); rErr != nil {
+				return nil, fmt.Errorf("ffmpeg split failed on part %d: %w", partIdx, rErr)
+			}
+		}
+
+		pStat, statErr := os.Stat(partPath)
+		if statErr != nil || pStat.Size() < 1024 {
+			_ = os.Remove(partPath)
+			break
+		}
+
+		pDetails, pErr := ProbeMedia(partPath)
+		if pErr != nil || pDetails.Duration <= 0 {
+			return nil, fmt.Errorf("could not probe part %d duration", partIdx)
+		}
+
+		// If duration of trailing keyframe fragment is negligible (<= 3s), drop it
+		if pDetails.Duration <= 3 && partIdx > 1 {
+			_ = os.Remove(partPath)
+			break
+		}
+
+		parts = append(parts, partPath)
+
+		// Advance startTime by part duration minus 3s overlap (as in AZML for keyframe alignment)
+		advance := pDetails.Duration - 3
+		if advance <= 0 {
+			advance = pDetails.Duration
+		}
+		startTime += advance
+
+		if startTime >= duration-4 {
+			break
+		}
+		partIdx++
+	}
+
+	if len(parts) > 1 {
+		return parts, nil
+	}
+	return nil, fmt.Errorf("size-based video split produced %d parts, expected > 1", len(parts))
 }
 
 func splitBinary(filePath string, maxSplitSize int64, outDir string) ([]string, error) {
@@ -534,7 +696,8 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 			cmd := exec.Command("ffmpeg",
 				"-hide_banner", "-loglevel", "error",
 				"-i", customThumbPath,
-				"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+				"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+				"-pix_fmt", "yuvj420p",
 				"-q:v", "2",
 				outThumb, "-y",
 			)
@@ -545,29 +708,67 @@ func GenerateThumbnail(filePath, customThumbPath string) string {
 		}
 	}
 
-	details, err := ProbeMedia(filePath)
-	if err != nil || details.Duration == 0 {
-		return ""
+	details, _ := ProbeMedia(filePath)
+	captureSec := 3
+	if details != nil && details.Duration > 4 {
+		captureSec = details.Duration / 4
+		if captureSec > 120 {
+			captureSec = 120
+		}
 	}
 
 	outThumb := filepath.Join(os.TempDir(), fmt.Sprintf("thumb_%s.jpg", RandomHex(4)))
-	captureSec := details.Duration / 4
-	if captureSec <= 0 {
-		captureSec = 1
-	}
 
+	// Primary attempt: fast input seeking with even dimension scaling
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-ss", strconv.Itoa(captureSec),
 		"-i", filePath,
 		"-vframes", "1",
-		"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outThumb, "-y",
 	)
 	if cmd.Run() == nil {
-		return outThumb
+		if fi, sErr := os.Stat(outThumb); sErr == nil && fi.Size() > 0 {
+			return outThumb
+		}
 	}
+
+	// Fallback attempt 1: accurate output seeking at 2s
+	cmdFallback := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-ss", "00:00:02",
+		"-vframes", "1",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
+		"-q:v", "2",
+		outThumb, "-y",
+	)
+	if cmdFallback.Run() == nil {
+		if fi, sErr := os.Stat(outThumb); sErr == nil && fi.Size() > 0 {
+			return outThumb
+		}
+	}
+
+	// Fallback attempt 2: frame 0 without seek (guaranteed for short / tricky files)
+	cmdFallback0 := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-vframes", "1",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
+		"-q:v", "2",
+		outThumb, "-y",
+	)
+	if cmdFallback0.Run() == nil {
+		if fi, sErr := os.Stat(outThumb); sErr == nil && fi.Size() > 0 {
+			return outThumb
+		}
+	}
+
 	return ""
 }
 
@@ -578,28 +779,65 @@ func GenerateVideoCover(filePath, customThumbPath string) string {
 		}
 	}
 
-	details, err := ProbeMedia(filePath)
-	if err != nil || details.Duration == 0 {
-		return ""
+	details, _ := ProbeMedia(filePath)
+	captureSec := 3
+	if details != nil && details.Duration > 4 {
+		captureSec = details.Duration / 4
+		if captureSec > 120 {
+			captureSec = 120
+		}
 	}
 
 	outCover := filepath.Join(os.TempDir(), fmt.Sprintf("cover_hd_%s.jpg", RandomHex(4)))
-	captureSec := details.Duration / 4
-	if captureSec <= 0 {
-		captureSec = 1
-	}
 
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-ss", strconv.Itoa(captureSec),
 		"-i", filePath,
 		"-vframes", "1",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outCover, "-y",
 	)
 	if cmd.Run() == nil {
-		return outCover
+		if fi, sErr := os.Stat(outCover); sErr == nil && fi.Size() > 0 {
+			return outCover
+		}
 	}
+
+	cmdFallback := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-ss", "00:00:02",
+		"-vframes", "1",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
+		"-q:v", "2",
+		outCover, "-y",
+	)
+	if cmdFallback.Run() == nil {
+		if fi, sErr := os.Stat(outCover); sErr == nil && fi.Size() > 0 {
+			return outCover
+		}
+	}
+
+	// Fallback 0: first frame
+	cmdFallback0 := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", filePath,
+		"-vframes", "1",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-pix_fmt", "yuvj420p",
+		"-q:v", "2",
+		outCover, "-y",
+	)
+	if cmdFallback0.Run() == nil {
+		if fi, sErr := os.Stat(outCover); sErr == nil && fi.Size() > 0 {
+			return outCover
+		}
+	}
+
 	return ""
 }
 

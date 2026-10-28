@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
@@ -83,14 +84,20 @@ func (m *CancelModule) HandleCancel(ctx context.Context, peer tg.InputPeerClass,
 
 	_ = task.Cancel()
 	m.taskMgr.RemoveTask(gid)
-	_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
-	if m.statusMod != nil {
-		if m.taskMgr.Count() == 0 {
-			m.statusMod.DeleteAllMessages(ctx)
-		} else {
-			go m.statusMod.UpdateAllMessages(ctx, true)
+
+	// Send confirmation and cleanup status asynchronously so HandleCancel returns immediately
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = m.sender.SendMessage(bgCtx, peer, fmt.Sprintf("✓ Task <code>%s</code> cancelled successfully!", gid), msg.MessageID, nil)
+		if m.statusMod != nil {
+			if m.taskMgr.Count() == 0 {
+				m.statusMod.DeleteAllMessages(bgCtx)
+			} else {
+				m.statusMod.UpdateAllMessages(bgCtx, true)
+			}
 		}
-	}
+	}()
 }
 
 func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
@@ -114,7 +121,7 @@ func (m *CancelModule) HandleCancelAll(ctx context.Context, peer tg.InputPeerCla
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("All Tasks"), "canall all", "danger")
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "canall close", "danger")
 
-	_, _ = m.sender.SendMessage(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn.BuildMenu(2))
+	_, _ = m.sender.SendMessageWithButtons(ctx, peer, "<b>Choose tasks to cancel:</b>", msg.MessageID, btn, 2)
 }
 
 func (m *CancelModule) HandleCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64) {

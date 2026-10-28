@@ -133,7 +133,7 @@ func (m *HelpModule) HandlePing(ctx context.Context, peer tg.InputPeerClass, msg
 	}
 }
 
-func (m *HelpModule) getStatsView(key string, targetUID int64) (string, tg.ReplyMarkupClass) {
+func (m *HelpModule) getStatsView(key string, targetUID int64) (string, *telegram.ButtonMaker) {
 	btn := telegram.NewButtonMaker()
 	var msg string
 
@@ -162,12 +162,12 @@ func (m *HelpModule) getStatsView(key string, targetUID int64) (string, tg.Reply
 		}
 	}
 
-	return msg, btn.BuildMenu(2)
+	return msg, btn
 }
 
 func (m *HelpModule) HandleStats(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext) {
-	text, markup := m.getStatsView("home", msg.UserID)
-	_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, markup)
+	text, btn := m.getStatsView("home", msg.UserID)
+	_, _ = m.sender.SendMessageWithButtons(ctx, peer, text, msg.MessageID, btn, 2)
 }
 
 func (m *HelpModule) HandleStatsCallback(ctx context.Context, peer tg.InputPeerClass, queryID int64, msgID int, data string, fromUID int64) {
@@ -230,8 +230,8 @@ func (m *HelpModule) HandleStatsCallback(ctx context.Context, peer tg.InputPeerC
 		return
 	}
 
-	text, markup := m.getStatsView(key, targetUID)
-	_ = m.sender.EditMessage(ctx, peer, msgID, text, markup)
+	text, btn := m.getStatsView(key, targetUID)
+	_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 	_ = m.sender.AnswerCallback(ctx, queryID, "", false)
 }
 

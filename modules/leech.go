@@ -14,6 +14,7 @@ import (
 	"azml-go/config"
 	"azml-go/helper/downloader"
 	"azml-go/helper/ext"
+	"azml-go/helper/pool"
 	"azml-go/helper/telegram"
 	"azml-go/helper/uploader"
 	"azml-go/types"
@@ -24,30 +25,41 @@ import (
 )
 
 type LeechModule struct {
-	rawAPI    *tg.Client
-	sender    *telegram.MessageSender
-	uploader  *uploader.TelegramUploader
-	userMap   *types.SafeUserMap
-	taskMgr   *ext.TaskManager
-	statusMod *StatusModule
+	rawAPI     *tg.Client
+	userRawAPI *tg.Client
+	sender     *telegram.MessageSender
+	uploader   *uploader.TelegramUploader
+	userMap    *types.SafeUserMap
+	taskMgr    *ext.TaskManager
+	statusMod  *StatusModule
+	sessPool   *pool.SessionPool
+	dumpChatID int64
 }
 
-func NewLeechModule(rawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule) *LeechModule {
+func NewLeechModule(rawAPI, userRawAPI *tg.Client, sender *telegram.MessageSender, uploader *uploader.TelegramUploader, userMap *types.SafeUserMap, statusMod *StatusModule, sessPool *pool.SessionPool, dumpChatID int64) *LeechModule {
 	return &LeechModule{
-		rawAPI:    rawAPI,
-		sender:    sender,
-		uploader:  uploader,
-		userMap:   userMap,
-		taskMgr:   ext.GetTaskManager(),
-		statusMod: statusMod,
+		rawAPI:     rawAPI,
+		userRawAPI: userRawAPI,
+		sender:     sender,
+		uploader:   uploader,
+		userMap:    userMap,
+		taskMgr:    ext.GetTaskManager(),
+		statusMod:  statusMod,
+		sessPool:   sessPool,
+		dumpChatID: dumpChatID,
 	}
+}
+
+func (m *LeechModule) SetSessionPool(sessPool *pool.SessionPool, dumpChatID int64) {
+	m.sessPool = sessPool
+	m.dumpChatID = dumpChatID
 }
 
 func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool) {
 	cfg := config.Get()
 
 	// Access control & token check
-	if msgText, btn := ext.CheckingAccess(msg.UserID, false, cfg.BotToken, m.userMap); msgText != "" {
+	if msgText, btn := ext.CheckingAccess(msg.UserID, false, telegram.CurrentBotUsername, m.userMap); msgText != "" {
 		var markup tg.ReplyMarkupClass
 		if btn != nil {
 			markup = btn.BuildMenu(1)
@@ -67,7 +79,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		opt.IsExtract = true
 	}
 
-	if link == "" && msg.IsReply && msg.ReplyText != "" {
+	if link == "" && msg.IsReply && msg.ReplyText != "" && !msg.HasMedia && msg.RawMedia == nil {
 		for _, w := range strings.Fields(msg.ReplyText) {
 			if strings.HasPrefix(w, "http") || strings.HasPrefix(w, "magnet:") {
 				link = w
@@ -80,10 +92,10 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 	}
 
 	// Bulk Leech Handling (-b / -bulk)
-	if strings.Contains(msg.Text, "-b") || strings.Contains(msg.Text, "-bulk") {
+	if opt.Bulk {
 		var rawLinks []string
 		sourceText := ""
-		if msg.IsReply && msg.ReplyText != "" {
+		if msg.IsReply && msg.ReplyText != "" && !msg.HasMedia && msg.RawMedia == nil {
 			sourceText = msg.ReplyText
 		} else if link != "" {
 			sourceText = link
@@ -102,20 +114,26 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		}
 
 		bulkLinks := rawLinks
-		parts := strings.Fields(msg.Text)
-		for idx, p := range parts {
-			if (p == "-b" || p == "-bulk") && idx+1 < len(parts) && strings.Contains(parts[idx+1], ":") {
-				rangeParts := strings.Split(parts[idx+1], ":")
-				start, _ := strconv.Atoi(rangeParts[0])
-				end, _ := strconv.Atoi(rangeParts[1])
-				if start < len(rawLinks) {
-					if end > 0 && end <= len(rawLinks) {
-						bulkLinks = rawLinks[start:end]
-					} else {
-						bulkLinks = rawLinks[start:]
-					}
+		rangeStr := opt.BulkRange
+		if rangeStr == "" {
+			parts := strings.Fields(msg.Text)
+			for idx, p := range parts {
+				if (p == "-b" || p == "-bulk") && idx+1 < len(parts) && strings.Contains(parts[idx+1], ":") {
+					rangeStr = parts[idx+1]
+					break
 				}
-				break
+			}
+		}
+		if rangeStr != "" && strings.Contains(rangeStr, ":") {
+			rangeParts := strings.Split(rangeStr, ":")
+			start, _ := strconv.Atoi(rangeParts[0])
+			end, _ := strconv.Atoi(rangeParts[1])
+			if start < len(rawLinks) {
+				if end > 0 && end <= len(rawLinks) {
+					bulkLinks = rawLinks[start:end]
+				} else {
+					bulkLinks = rawLinks[start:]
+				}
 			}
 		}
 
@@ -129,9 +147,18 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 					_ = os.MkdirAll(subTaskDir, 0777)
 				}
 
+				isFirstBulk := false
+				if m.statusMod != nil {
+					isFirstBulk = m.statusMod.ReserveStatusSlot(msg.ChatID)
+				}
+
 				nID, _ := m.sender.SendMessage(context.Background(), peer, fmt.Sprintf("<i>Initiating Leech:</i> <code>%s</code>", truncateString(bLink, 40)), msg.MessageID, nil)
 				if nID > 0 && m.statusMod != nil {
-					m.statusMod.SetStatusMessage(msg.ChatID, nID, peer)
+					if isFirstBulk {
+						m.statusMod.SetStatusMessage(msg.ChatID, nID, peer)
+					} else {
+						m.sender.AutoDeleteMessage(peer, nID, 4)
+					}
 				}
 				m.processLeechPipeline(peer, msg, opt, bLink, subTaskDir, nID)
 				time.Sleep(2 * time.Second)
@@ -183,6 +210,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 					SenderName: msg.SenderName,
 					Text:       targetMsg.Message,
 					HasMedia:   targetMsg.Media != nil,
+					RawMedia:   targetMsg.Media,
 					ReplyToID:  targetID,
 					IsReply:    true,
 				}
@@ -204,6 +232,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 			"┠ <code>-p</code> — %s\n"+
 			"┠ <code>-ss</code> — %s\n"+
 			"┠ <code>-d</code> — %s\n"+
+			"┠ <code>-med</code> — %s\n"+
 			"┠ <code>-ud</code> — %s\n"+
 			"┖ <code>-st</code> — %s",
 			telegram.ToSmallCaps("Leech Command Usage"),
@@ -216,6 +245,7 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 			telegram.ToSmallCaps("Extraction Password"),
 			telegram.ToSmallCaps("Generate Screenshots"),
 			telegram.ToSmallCaps("Upload as Document"),
+			telegram.ToSmallCaps("Upload as Media"),
 			telegram.ToSmallCaps("Custom Dump Chat ID"),
 			telegram.ToSmallCaps("Extract Video Streams"))
 		_, _ = m.sender.SendMessage(ctx, peer, helpMsg, msg.MessageID, nil)
@@ -235,9 +265,18 @@ func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, m
 		_ = os.MkdirAll(taskDir, 0777)
 	}
 
+	isFirstStatus := false
+	if m.statusMod != nil {
+		isFirstStatus = m.statusMod.ReserveStatusSlot(msg.ChatID)
+	}
+
 	notifyID, _ := m.sender.SendMessage(ctx, peer, fmt.Sprintf("<i>%s...</i>", telegram.ToSmallCaps("Initiating Leech Task")), msg.MessageID, nil)
 	if notifyID > 0 && m.statusMod != nil {
-		m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		if isFirstStatus {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+		} else {
+			m.sender.AutoDeleteMessage(peer, notifyID, 4)
+		}
 	}
 
 	go m.processLeechPipeline(peer, msg, opt, link, taskDir, notifyID)
@@ -259,7 +298,13 @@ func (m *LeechModule) sendDownloadError(ctx context.Context, peer tg.InputPeerCl
 		tag, telegram.EscapeHTML(errStr), mode, elapsed)
 
 	if notifyID > 0 {
-		_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		statusMsgID := 0
+		if m.statusMod != nil {
+			statusMsgID = m.statusMod.GetStatusMessageID(msg.ChatID)
+		}
+		if notifyID != statusMsgID || m.taskMgr.Count() <= 1 {
+			_ = m.sender.DeleteMessage(ctx, peer, []int{notifyID})
+		}
 	}
 	_, _ = m.sender.SendMessage(ctx, peer, errMsg, msg.MessageID, nil)
 
@@ -293,24 +338,17 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		return
 	}
 
-	// Try DDL API for Telegram files first to download via 16-connection Aria2c
-	if cfg.DDLAPI != "" {
-		var tgChannelID int64
-		var tgMsgID int
+	// Try DDL API for Telegram links (t.me/... or t.me/c/...) if a link was provided
+	if cfg.DDLAPI != "" && link != "" {
 		if cid, mid, ok := ext.ParseTelegramLink(link); ok {
-			tgChannelID = cid
+			tgChannelID := cid
 			if tgChannelID == 0 {
 				tgChannelID = msg.ChatID
 			}
-			tgMsgID = mid
-		} else if msg.IsReply && msg.ReplyToID != 0 {
-			tgChannelID = msg.ChatID
-			tgMsgID = msg.ReplyToID
-		}
-
-		if tgMsgID != 0 {
-			if ddlURL, err := ext.TryDDLAPI(ctx, tgChannelID, tgMsgID); err == nil && ddlURL != "" {
-				link = ddlURL
+			if mid != 0 {
+				if ddlURL, err := ext.TryDDLAPI(ctx, tgChannelID, mid); err == nil && ddlURL != "" {
+					link = ddlURL
+				}
 			}
 		}
 	}
@@ -335,38 +373,45 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			}
 		} else if msg.FileName != "" {
 			displayName = msg.FileName
+		} else if msg.IsReply {
+			displayName = "Telegram File"
+		} else {
+			displayName = "Leech Task"
+		}
+	}
+	displayName = filepath.Base(displayName)
+
+	uTask := ext.NewUnifiedTask(taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
+	m.taskMgr.AddTask(uTask)
+
+	// Instantly render the status progress bar so the user gets an immediate (<1s) response
+	if notifyID > 0 && m.statusMod != nil {
+		if !m.statusMod.HasStatusMessage(msg.ChatID) {
+			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
+			text, btn := m.taskMgr.BuildStatusMessage(1)
+			_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
+		} else {
+			go m.statusMod.UpdateAllMessages(ctx, true)
 		}
 	}
 
-	// For HTTP/HTTPS links: probe remote headers to resolve true filename (Content-Disposition) & extension
+	// For HTTP/HTTPS links: probe remote headers to resolve true filename (Content-Disposition) & extension in background
 	if ext.IsURL(link) && !ext.IsMagnet(link) && !strings.Contains(strings.ToLower(link), ".torrent") {
 		resolvedName, finalURL, resolvedSize, _ := ext.ResolveDownloadMetadata(ctx, link)
 		if resolvedName != "" {
 			if opt.CustomName == "" {
 				opt.CustomName = resolvedName
+				displayName = resolvedName
+				uTask.SetName(resolvedName)
 			}
-			displayName = resolvedName
 		}
 		if finalURL != "" {
 			link = finalURL
 		}
 		if msg.FileSize == 0 && resolvedSize > 0 {
 			msg.FileSize = resolvedSize
+			uTask.SetSize(resolvedSize)
 		}
-	}
-
-	displayName = filepath.Base(displayName)
-
-	uTask := ext.NewUnifiedTask(taskUID, displayName, msg.FileSize, msg.ChatID, msg.UserID, notifyID, cancel)
-	m.taskMgr.AddTask(uTask)
-
-	// Instantly render the status progress bar so the user never sees a stuck "Initiating..." message
-	if notifyID > 0 {
-		if m.statusMod != nil {
-			m.statusMod.SetStatusMessage(msg.ChatID, notifyID, peer)
-		}
-		text, btn := m.taskMgr.BuildStatusMessage(1)
-		_ = m.sender.EditMessageWithButtons(ctx, peer, notifyID, text, btn, 3)
 	}
 
 	defer func() {
@@ -414,7 +459,12 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		if mediaSource == nil && msg.IsReply && msg.ReplyToID > 0 {
 			targetMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, msg.ReplyToID)
 			if err == nil && targetMsg != nil {
-				if targetMsg.Message != "" {
+				if targetMsg.Media != nil {
+					mediaSource = targetMsg.Media
+					msg.HasMedia = true
+					msg.RawMedia = targetMsg.Media
+					link = ""
+				} else if targetMsg.Message != "" {
 					for _, tok := range strings.Fields(targetMsg.Message) {
 						if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
 							link = tok
@@ -422,16 +472,14 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 						}
 					}
 				}
-				if targetMsg.Media != nil {
-					mediaSource = targetMsg.Media
-				}
 			} else if err != nil {
 				log.Printf("[LEECH] Failed to fetch replied message %d: %v", msg.ReplyToID, err)
 				dlErr = fmt.Errorf("failed to fetch replied message: %v", err)
 			}
 		}
 
-		if link == "" && mediaSource != nil {
+		if mediaSource != nil {
+			link = ""
 			// Case 1A: Document Media (Videos, Audio, Archives, Files)
 			if docMedia, ok := mediaSource.(*tg.MessageMediaDocument); ok {
 				if doc, ok := docMedia.Document.(*tg.Document); ok {
@@ -457,7 +505,11 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 						}
 					}
 					if opt.CustomName != "" {
+						origExt := filepath.Ext(fileName)
 						fileName = opt.CustomName
+						if filepath.Ext(fileName) == "" && origExt != "" {
+							fileName += origExt
+						}
 					}
 					fileName = strings.ReplaceAll(fileName, "/", "_")
 					fileName = strings.ReplaceAll(fileName, "\\", "_")
@@ -465,54 +517,98 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 					_ = os.MkdirAll(filepath.Dir(destPath), 0777)
 					uTask.SetName(fileName)
 					uTask.SetSize(doc.Size)
-					uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
+					var dlSuccess bool
 
-					dl := tdDownloader.NewDownloader().WithPartSize(512 * 1024)
-					loc := doc.AsInputDocumentFileLocation("")
-					if loc != nil {
-						stopProgress := make(chan struct{})
-						go func() {
-							ticker := time.NewTicker(1 * time.Second)
-							defer ticker.Stop()
-							var lastBytes int64
-							lastTime := time.Now()
-							for {
-								select {
-								case <-stopProgress:
-									return
-								case <-ticker.C:
-									if fi, statErr := os.Stat(destPath); statErr == nil {
-										cur := fi.Size()
-										now := time.Now()
-										elapsed := now.Sub(lastTime).Seconds()
-										if elapsed > 0 {
-											speed := float64(cur-lastBytes) / elapsed
-											rem := doc.Size - cur
-											eta := "-"
-											if speed > 0 && rem > 0 {
-												eta = ext.GetReadableTime(int64(float64(rem) / speed))
+					effectiveDumpChatID := m.dumpChatID
+					if effectiveDumpChatID == 0 && cfg != nil {
+						effectiveDumpChatID = cfg.DumpChatID
+					}
+					if effectiveDumpChatID == 0 && cfg != nil {
+						effectiveDumpChatID = cfg.LeechLogID
+					}
+
+					// Check if Multi-Bot Download is enabled and sessions are active
+					if m.sessPool != nil && m.sessPool.ActiveSessionCount() > 0 && effectiveDumpChatID != 0 {
+						targetMsgID := msg.ReplyToID
+						if targetMsgID == 0 {
+							targetMsgID = msg.MessageID
+						}
+
+						rawDumpID := pool.RawChannelID(effectiveDumpChatID)
+						dumpHash := telegram.ResolveChannelAccessHash(ctx, m.rawAPI, effectiveDumpChatID)
+						if dumpHash == 0 {
+							dumpHash = telegram.GetChannelAccessHash(rawDumpID)
+						}
+
+						if dumpHash != 0 {
+							dumpPeer := &tg.InputPeerChannel{
+								ChannelID:  rawDumpID,
+								AccessHash: dumpHash,
+							}
+							log.Printf("[LEECH Multi-Bot] Forwarding message %d to dump channel %d for multi-client download...", targetMsgID, effectiveDumpChatID)
+							fwdMsgID, fwdErr := telegram.ForwardToChannelWithFloodWait(ctx, m.rawAPI, peer, dumpPeer, targetMsgID)
+
+							if fwdErr == nil && fwdMsgID > 0 {
+								uTask.SetStatus(types.StatusDownloading, "Multi-Bot MTProto")
+								multiDL := downloader.NewMultiBotDownloader(m.sessPool, cfg.WorkerBotTokens, cfg.TelegramAPI, cfg.TelegramHash)
+								dlErr = multiDL.DownloadToFile(ctx, effectiveDumpChatID, int64(fwdMsgID), doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
+									uTask.SetProgress(curr, total, speed, eta)
+								})
+								// Retain forwarded message in dump channel for backup and multi-client access
+
+								if dlErr == nil {
+									downloadedPath = destPath
+									uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+									dlSuccess = true
+									log.Printf("[LEECH Multi-Bot] Multi-bot download succeeded for %s (%s)", fileName, ext.GetReadableFileSize(doc.Size))
+								} else {
+									log.Printf("[LEECH Multi-Bot] Multi-bot download returned error: %v. Falling back to single-client downloader...", dlErr)
+								}
+							} else {
+								log.Printf("[LEECH Multi-Bot] Failed to forward to dump channel (%v, msgID: %d). Falling back to single-client downloader...", fwdErr, fwdMsgID)
+							}
+						}
+					}
+
+					// Fallback to single-client chunk downloader if multi-bot was not active or failed
+					if !dlSuccess {
+						uTask.SetStatus(types.StatusDownloading, "Telegram MTProto")
+						downloadClient := m.rawAPI
+						if m.userRawAPI != nil {
+							downloadClient = m.userRawAPI
+						}
+						chunkDL := downloader.NewTelegramChunkDownloader(downloadClient)
+						loc := doc.AsInputDocumentFileLocation("")
+						if loc != nil {
+							refreshRef := func() ([]byte, error) {
+								if msg.IsReply && msg.ReplyToID > 0 {
+									rMsg, err := telegram.FetchMessage(ctx, m.rawAPI, peer, msg.ReplyToID)
+									if err == nil && rMsg != nil {
+										if dMedia, ok := rMsg.Media.(*tg.MessageMediaDocument); ok {
+											if dDoc, ok := dMedia.Document.(*tg.Document); ok {
+												return dDoc.FileReference, nil
 											}
-											uTask.SetProgress(cur, doc.Size, speed, eta)
-											lastBytes = cur
-											lastTime = now
 										}
 									}
 								}
+								return nil, fmt.Errorf("failed to refresh file reference")
 							}
-						}()
 
-						_, err := dl.Download(m.rawAPI, loc).WithThreads(8).ToPath(ctx, destPath)
-						close(stopProgress)
+							err := chunkDL.DownloadToFile(ctx, loc, doc.Size, destPath, func(curr, total int64, speed float64, eta string) {
+								uTask.SetProgress(curr, total, speed, eta)
+							}, refreshRef)
 
-						if err == nil {
-							downloadedPath = destPath
-							uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+							if err == nil {
+								downloadedPath = destPath
+								uTask.SetProgress(doc.Size, doc.Size, 0, "-")
+								dlErr = nil
+							} else {
+								log.Printf("[LEECH] MTProto document download error: %v", err)
+								dlErr = err
+							}
 						} else {
-							log.Printf("[LEECH] MTProto document download error: %v", err)
-							dlErr = err
+							dlErr = fmt.Errorf("failed to get Telegram document file location")
 						}
-					} else {
-						dlErr = fmt.Errorf("failed to get Telegram document file location")
 					}
 				} else {
 					dlErr = fmt.Errorf("replied document is empty or unavailable")
@@ -862,12 +958,21 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		}
 	}
 
-	displayName = filepath.Base(downloadedPath)
-	uTask.SetName(displayName)
-	if fi, err := os.Stat(downloadedPath); err == nil && !fi.IsDir() {
+	fi, statErr := os.Stat(downloadedPath)
+	if statErr != nil {
+		m.sendDownloadError(ctx, peer, msg, notifyID, fmt.Sprintf("Downloaded file not found on disk: %v", statErr), modeStr, taskStartTime)
+		return
+	}
+	if !fi.IsDir() {
+		if fi.Size() == 0 {
+			m.sendDownloadError(ctx, peer, msg, notifyID, "Downloaded file is empty (0 bytes)", modeStr, taskStartTime)
+			return
+		}
 		uTask.SetSize(fi.Size())
 		uTask.SetProgress(fi.Size(), fi.Size(), 0, "-")
 	}
+	displayName = filepath.Base(downloadedPath)
+	uTask.SetName(displayName)
 
 	// 2. Post-processing: Forceful Archive Extraction (/leech -e, -extract, -uz, -p)
 	// Reads binary magic bytes (PK, 7z, Rar!, etc.) even if the file extension was disguised or missed
@@ -1013,6 +1118,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			if err := ext.EditMetadata(curFile, outMeta, user.Metadata); err == nil {
 				_ = os.Remove(curFile)
 				curFile = outMeta
+			} else {
+				log.Printf("[LEECH Metadata] Warning: EditMetadata failed for %s: %v (using original)", origBase, err)
 			}
 		}
 
@@ -1022,7 +1129,9 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			finalName = opt.CustomName
 		}
 		if filepath.Ext(finalName) == "" {
-			if detectedExt := ext.DetectExtension(curFile); detectedExt != "" {
+			if origExt := filepath.Ext(origBase); origExt != "" {
+				finalName += origExt
+			} else if detectedExt := ext.DetectExtension(curFile); detectedExt != "" {
 				finalName += detectedExt
 			}
 		}
@@ -1054,8 +1163,23 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 		if user != nil && user.AutoThumb {
 			autoThumbEnabled = true
 		}
+
+		// Effective upload as document resolution:
+		// 1. Bot-wide default (cfg.AsDocument, default true)
+		// 2. User setting overrides if user exists (user.AsDoc)
+		// 3. Command flags (-d/-doc forces document, -m/-med/-media forces media)
+		asDoc := cfg.AsDocument
+		if user != nil {
+			asDoc = user.AsDoc
+		}
+		if opt.AsDoc {
+			asDoc = true
+		} else if opt.AsMedia {
+			asDoc = false
+		}
+
 		if customThumb == "" && autoThumbEnabled {
-			if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, opt.AsDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
+			if tmdbThumb, err := ext.GetAutoThumbnail(ctx, finalName, asDoc, cfg.LeechFilenameRemnameRegex); err == nil && tmdbThumb != "" {
 				customThumb = tmdbThumb
 			}
 		}
@@ -1073,8 +1197,13 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 			splitSize = maxSplit
 		}
 
+		equalSplits := cfg.EqualSplits
+		if user != nil {
+			equalSplits = user.EqualSplits
+		}
+
 		splitDir := filepath.Join(taskDir, "splits")
-		splitParts, splitErr := ext.SplitFile(curFile, splitSize, splitDir)
+		splitParts, splitErr := ext.SplitFile(curFile, splitSize, splitDir, equalSplits)
 		if splitErr != nil || len(splitParts) == 0 {
 			splitParts = []string{curFile}
 		}
@@ -1099,10 +1228,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				partCaption += fmt.Sprintf("\n\n◈ <a href=\"%s\">Screenshots</a>", ssLinks[0])
 			}
 
-			botPM := cfg.BotPM
-			if user != nil && user.BotPM {
-				botPM = true
-			}
+			botPM := cfg.BotPM || (user != nil && user.BotPM) || (msg.ChatID != msg.UserID)
 
 			upOpt := uploader.UploadOptions{
 				FilePath:   part,
@@ -1110,7 +1236,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				Caption:    partCaption,
 				ThumbPath:  thumbPath,
 				CoverPath:  coverPath,
-				AsDoc:      opt.AsDoc || cfg.AsDocument,
+				AsDoc:      asDoc,
 				DumpChatID: dumpID,
 				LogChatID:  cfg.LeechLogID,
 				UserID:     msg.UserID,
@@ -1182,10 +1308,7 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	}
 	sb.WriteString(fmt.Sprintf("└── <b>By:</b> %s\n\n", userTag))
 
-	botPM := cfg.BotPM
-	if user != nil && user.BotPM {
-		botPM = true
-	}
+	botPM := cfg.BotPM || (user != nil && user.BotPM) || (msg.ChatID != msg.UserID)
 	if botPM {
 		sb.WriteString("➲ <i>File(s) have been Sent to Bot PM (Private)</i>\n")
 	} else {
@@ -1263,11 +1386,12 @@ func splitArgsRespectingQuotes(s string) []string {
 func isLeechFlag(tok string) bool {
 	switch tok {
 	case "-b", "-bulk", "-z", "-zip", "-e", "-extract", "-uz", "-unzip",
-		"-d", "-asdoc", "-st", "-streams", "-n", "-name", "-p", "-password",
+		"-d", "-doc", "-asdoc", "-m", "-med", "-media", "-asmedia",
+		"-st", "-streams", "-n", "-name", "-p", "-password",
 		"-pssw", "-ss", "-screenshots", "-ud", "-dump", "-ff", "-i", "-s", "-select":
 		return true
 	default:
-		return strings.HasPrefix(tok, "-")
+		return false
 	}
 }
 
@@ -1282,19 +1406,27 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 	for i := 1; i < len(tokens); i++ {
 		tok := tokens[i]
 		switch tok {
+		case "-b", "-bulk":
+			opt.Bulk = true
+			if i+1 < len(tokens) && !isLeechFlag(tokens[i+1]) && !ext.IsURL(tokens[i+1]) && !ext.IsMagnet(tokens[i+1]) && strings.Contains(tokens[i+1], ":") {
+				opt.BulkRange = tokens[i+1]
+				i++
+			}
 		case "-z", "-zip":
 			opt.IsZip = true
 		case "-e", "-extract", "-uz", "-unzip":
 			opt.IsExtract = true
-		case "-d", "-asdoc":
+		case "-d", "-doc", "-asdoc":
 			opt.AsDoc = true
+		case "-m", "-med", "-media", "-asmedia":
+			opt.AsMedia = true
 		case "-st", "-streams":
 			opt.ExtractStrm = true
 		case "-n", "-name":
 			var nameParts []string
 			for i+1 < len(tokens) {
 				nextTok := tokens[i+1]
-				if isLeechFlag(nextTok) || strings.HasPrefix(nextTok, "http://") || strings.HasPrefix(nextTok, "https://") || strings.HasPrefix(nextTok, "magnet:") {
+				if isLeechFlag(nextTok) || ext.IsURL(nextTok) || ext.IsMagnet(nextTok) || ext.IsMegaLink(nextTok) || strings.HasPrefix(nextTok, "tg://") {
 					break
 				}
 				nameParts = append(nameParts, nextTok)
@@ -1349,7 +1481,7 @@ func parseLeechArgs(text string) (types.LeechOptions, string) {
 					opt.Password = tokens[i+1]
 					i++
 				}
-			} else if strings.HasPrefix(tok, "http") || strings.HasPrefix(tok, "magnet:") {
+			} else if ext.IsURL(tok) || ext.IsMagnet(tok) || ext.IsMegaLink(tok) || strings.HasPrefix(tok, "tg://") {
 				link = tok
 			}
 		}

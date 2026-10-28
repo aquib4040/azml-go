@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -83,6 +84,8 @@ type Config struct {
 	DailyLeechLimit           int64 // GB
 	DailyTaskLimit            int   // count
 	StorageThreshold          int64 // GB
+	WorkerBotTokens           []string
+	DumpChatID                int64
 }
 
 var (
@@ -138,7 +141,7 @@ func LoadConfig(path string) (*Config, error) {
 		AutoDeleteMessageDuration: getEnvInt("AUTO_DELETE_MESSAGE_DURATION", 60),
 		LeechSplitSize:            getEnvInt64("LEECH_SPLIT_SIZE", 2097152000), // ~2GB
 		EqualSplits:               getEnvBool("EQUAL_SPLITS", false),
-		AsDocument:                getEnvBool("AS_DOCUMENT", false),
+		AsDocument:                getEnvBool("AS_DOCUMENT", true),
 		MediaGroup:                getEnvBool("MEDIA_GROUP", false),
 		BotPM:                     getEnvBool("BOT_PM", false),
 		CapFont:                   getEnv("CAP_FONT", "code"),
@@ -179,9 +182,9 @@ func LoadConfig(path string) (*Config, error) {
 		AutoThumbnail:             getEnvBool("AUTO_THUMBNAIL", false),
 		CoverImage:                getEnv("COVER_IMAGE", "https://graph.org/file/60f9f8bcb97d27f76f5c0.jpg"),
 		DDLAPI:                    getEnv("DDL_API", getEnv("THUNDER_API", "")),
-		QueueAll:                  getEnvInt("QUEUE_ALL", getEnvInt("BOT_MAX_TASKS", 0)),
-		QueueDownload:             getEnvInt("QUEUE_DOWNLOAD", getEnvInt("USER_MAX_TASKS", 0)),
-		QueueUpload:               getEnvInt("QUEUE_UPLOAD", 0),
+		QueueAll:                  getEnvInt("QUEUE_ALL", getEnvInt("BOT_MAX_TASKS", 4)),
+		QueueDownload:             getEnvInt("QUEUE_DOWNLOAD", getEnvInt("USER_MAX_TASKS", 2)),
+		QueueUpload:               getEnvInt("QUEUE_UPLOAD", 2),
 		LeechLimit:                getEnvInt64("LEECH_LIMIT", 0),
 		TorrentLimit:              getEnvInt64("TORRENT_LIMIT", 0),
 		DirectLimit:               getEnvInt64("DIRECT_LIMIT", 0),
@@ -192,6 +195,54 @@ func LoadConfig(path string) (*Config, error) {
 		DailyLeechLimit:           getEnvInt64("DAILY_LEECH_LIMIT", 0),
 		DailyTaskLimit:            getEnvInt("DAILY_TASK_LIMIT", 0),
 		StorageThreshold:          getEnvInt64("STORAGE_THRESHOLD", 1), // Default 1GB safety cushion
+		DumpChatID:                getEnvInt64("DUMP_CHAT_ID", getEnvInt64("BIN_CHANNEL", getEnvInt64("STORAGE_CHANNEL", getEnvInt64("STORAGE_CHANNELS", getEnvInt64("LEECH_LOG_ID", 0))))),
+	}
+
+	// Resolve main bot token
+	mainToken := strings.Trim(strings.TrimSpace(getEnv("BOT_TOKEN", getEnv("MAIN_BOT_TOKEN", ""))), `"'`)
+	if mainToken == "" {
+		for _, candidate := range parseTokenString(getEnv("BOT_TOKENS", getEnv("MULTI_TOKENS", getEnv("MULTI_TOKEN", "")))) {
+			if candidate != "" {
+				mainToken = candidate
+				break
+			}
+		}
+	}
+	GlobalConfig.BotToken = mainToken
+
+	// Collect multi-bot worker tokens (strictly excluding the main BotToken)
+	seenTokens := make(map[string]bool)
+	var workerTokens []string
+
+	tokenSources := []string{
+		getEnv("BOT_TOKENS", ""),
+		getEnv("MULTI_TOKENS", ""),
+		getEnv("MULTI_TOKEN", ""),
+		getEnv("TOKENS", ""),
+		getEnv("WORKER_TOKENS", ""),
+	}
+
+	for _, src := range tokenSources {
+		for _, t := range parseTokenString(src) {
+			if t != "" && t != mainToken && !seenTokens[t] {
+				workerTokens = append(workerTokens, t)
+				seenTokens[t] = true
+			}
+		}
+	}
+
+	for i := 1; i <= 100; i++ {
+		key := fmt.Sprintf("MULTI_TOKEN%d", i)
+		if val := strings.Trim(strings.TrimSpace(os.Getenv(key)), `"'`); val != "" {
+			if val != mainToken && !seenTokens[val] {
+				workerTokens = append(workerTokens, val)
+				seenTokens[val] = true
+			}
+		}
+	}
+	GlobalConfig.WorkerBotTokens = workerTokens
+	if len(workerTokens) > 0 {
+		log.Printf("[Config] Loaded %d Multi-Bot Worker tokens for parallel transfers (Main Bot excluded, Dump: %d)", len(workerTokens), GlobalConfig.DumpChatID)
 	}
 
 	if err := os.MkdirAll(GlobalConfig.DownloadDir, 0777); err != nil {
@@ -231,12 +282,33 @@ func getEnvInt(key string, defaultVal int) int {
 	return n
 }
 
+func parseTokenString(raw string) []string {
+	var tokens []string
+	raw = strings.ReplaceAll(raw, ";", ",")
+	raw = strings.ReplaceAll(raw, "\n", ",")
+	raw = strings.ReplaceAll(raw, "\r", ",")
+	raw = strings.ReplaceAll(raw, "\t", ",")
+	for _, part := range strings.Split(raw, ",") {
+		for _, token := range strings.Fields(part) {
+			token = strings.Trim(strings.TrimSpace(token), `"'`)
+			if token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens
+}
+
 func getEnvInt64(key string, defaultVal int64) int64 {
 	val := os.Getenv(key)
 	if val == "" {
 		return defaultVal
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+	val = strings.Trim(strings.TrimSpace(val), `"'`)
+	if strings.Contains(val, ",") {
+		val = strings.TrimSpace(strings.Split(val, ",")[0])
+	}
+	n, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
 		return defaultVal
 	}

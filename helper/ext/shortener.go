@@ -21,7 +21,7 @@ import (
 )
 
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
+	Timeout: 4 * time.Second,
 }
 
 type ShortenerEntry struct {

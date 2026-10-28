@@ -1,17 +1,21 @@
 package downloader
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,6 +109,118 @@ func GetAria2Client() *Aria2RPCClient {
 	return Aria2Client
 }
 
+func findAriaBinary() string {
+	candidates := []string{
+		"studymaterial",
+		"/app/.apt/usr/bin/studymaterial",
+		"/usr/bin/studymaterial",
+		"aria2c",
+		"/app/.apt/usr/bin/aria2c",
+		"/app/.apt/bin/aria2c",
+		"/usr/bin/aria2c",
+		"/usr/local/bin/aria2c",
+		"/tmp/aria2c",
+	}
+
+	for _, cand := range candidates {
+		if strings.Contains(cand, "/") {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+				_ = os.Chmod(cand, 0755)
+				return cand
+			}
+		} else {
+			if p, err := exec.LookPath(cand); err == nil {
+				return p
+			}
+		}
+	}
+
+	if runtime.GOOS == "linux" {
+		targetPath := "/tmp/aria2c"
+		if fi, err := os.Stat(targetPath); err == nil && !fi.IsDir() {
+			_ = os.Chmod(targetPath, 0755)
+			return targetPath
+		}
+		if err := autoInstallStaticAria2(targetPath); err == nil {
+			return targetPath
+		}
+	}
+
+	return "aria2c"
+}
+
+func autoInstallStaticAria2(targetPath string) error {
+	urls := []string{
+		"https://github.com/P3TERX/Aria2-Pro-Core/releases/download/1.36.0_2021.08.22/aria2-1.36.0-static-linux-amd64.tar.gz",
+	}
+
+	var lastErr error
+	client := &http.Client{Timeout: 90 * time.Second}
+
+	for _, u := range urls {
+		log.Printf("[Aria2c] Auto-installing static aria2c binary from %s to %s...", u, targetPath)
+		resp, err := client.Get(u)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		gzReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			resp.Body.Close()
+			lastErr = err
+			continue
+		}
+
+		tarReader := tar.NewReader(gzReader)
+		found := false
+		for {
+			header, err := tarReader.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				lastErr = err
+				break
+			}
+			if (header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA) && filepath.Base(header.Name) == "aria2c" {
+				outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+				if err != nil {
+					lastErr = err
+					break
+				}
+				_, err = io.Copy(outFile, tarReader)
+				outFile.Close()
+				if err != nil {
+					lastErr = err
+					break
+				}
+				_ = os.Chmod(targetPath, 0755)
+				found = true
+				log.Printf("[Aria2c] Static aria2c binary successfully installed to %s", targetPath)
+				break
+			}
+		}
+		gzReader.Close()
+		resp.Body.Close()
+
+		if found {
+			return nil
+		}
+	}
+
+	if lastErr != nil {
+		log.Printf("[Aria2c] Auto-install failed: %v", lastErr)
+		return lastErr
+	}
+	return errors.New("static binary not found in archive")
+}
+
 func (a *Aria2RPCClient) EnsureStarted() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -118,18 +234,13 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		Method:  "aria2.getVersion",
 		Params:  []interface{}{},
 	}
-	if _, err := a.call(req); err == nil {
+	if _, err := a.rawCall(req); err == nil {
 		a.started = true
 		return nil
 	}
 
 	// Start aria2c / studymaterial daemon with max connection and speed optimizations
-	binName := "aria2c"
-	if _, err := exec.LookPath("studymaterial"); err == nil {
-		binName = "studymaterial"
-	} else if _, err := os.Stat("/usr/bin/studymaterial"); err == nil {
-		binName = "/usr/bin/studymaterial"
-	}
+	binName := findAriaBinary()
 	defaultTrackers := "udp://tracker.opentrackr.org:1337/announce," +
 		"udp://open.stealth.si:80/announce," +
 		"udp://tracker.torrent.eu.org:451/announce," +
@@ -173,13 +284,24 @@ func (a *Aria2RPCClient) EnsureStarted() error {
 		"--daemon=true",
 	)
 
-	_ = cmd.Run()
-	time.Sleep(1 * time.Second)
-	a.started = true
+	if err := cmd.Run(); err != nil {
+		log.Printf("[Aria2c] Failed to start daemon (%s): %v", binName, err)
+		return err
+	}
+
+	for i := 0; i < 10; i++ {
+		time.Sleep(300 * time.Millisecond)
+		if _, err := a.rawCall(req); err == nil {
+			a.started = true
+			log.Printf("[Aria2c] Daemon successfully started on port %d", port)
+			return nil
+		}
+	}
+	log.Printf("[Aria2c] Warning: daemon process launched but not yet responding on port %d", port)
 	return nil
 }
 
-func (a *Aria2RPCClient) call(req JSONRPCRequest) (*JSONRPCResponse, error) {
+func (a *Aria2RPCClient) rawCall(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	reqData, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -199,6 +321,19 @@ func (a *Aria2RPCClient) call(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		return nil, fmt.Errorf("aria2 error (%d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 	return &rpcResp, nil
+}
+
+func (a *Aria2RPCClient) call(req JSONRPCRequest) (*JSONRPCResponse, error) {
+	res, err := a.rawCall(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "connect:") {
+			log.Printf("[Aria2c] RPC unreachable (%v), attempting to restart daemon...", err)
+			_ = a.EnsureStarted()
+			return a.rawCall(req)
+		}
+		return nil, err
+	}
+	return res, nil
 }
 
 func (a *Aria2RPCClient) AddURI(link, downloadDir, filename string, headers []string) (string, error) {
