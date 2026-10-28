@@ -19,8 +19,8 @@
 [![](https://img.shields.io/github/commit-activity/m/aquib4040/azml-go?logo=github&labelColor=292c3b&label=Github%20Commits)](#)
 [![](https://img.shields.io/github/license/aquib4040/azml-go?style=flat&label=License&labelColor=292c3b)](#)
 [![](https://img.shields.io/github/stars/aquib4040/azml-go?style=flat&logo=github&label=Stars&labelColor=292c3b&color=yellow)](#)
-[![](https://img.shields.io/badge/Telegram%20Channel-Join-9cf?logo=telegram&labelColor=292c3b)](https://t.me/Thealphabotz)
-[![](https://img.shields.io/badge/Support%20Group-Join-9cf?logo=telegram&labelColor=292c3b)](https://t.me/AlphaBotzChat)
+[![](https://img.shields.io/badge/Telegram%20Channel-Join-9cf?logo=telegram&labelColor=292c3b)](https://t.me/canon_bots)
+[![](https://img.shields.io/badge/Support%20Group-Join-9cf?logo=telegram&labelColor=292c3b)](https://t.me/canon_bots)
 
 </div>
 
