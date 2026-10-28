@@ -107,21 +107,19 @@ Python-based Telegram bots are feature-rich but frequently suffer under heavy mu
 
 ## 🛠️ Deployment Methods
 
-Choose between **Heroku CLI** or a **Linux VPS (Docker Compose)**.
+Choose between **Heroku CLI (Server-side Build)**, **Automated GitHub Actions CD**, or **Linux VPS (Docker Compose)**.
 
 ---
 
-### Method 1: Deploy on Heroku (Heroku CLI)
+### Method 1: Deploy on Heroku (Heroku CLI - Server Build)
 
-Deploy `AZML-Go` on Heroku using the Docker container runtime.
+Deploys `AZML-Go` using Heroku's **Container Stack** where Heroku builds the `Dockerfile` directly on their remote build servers via `heroku.yml` (no local Docker build required).
 
 #### 1. Prerequisites
 - Install the [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli):
   ```bash
-  # Linux (Ubuntu/Debian)
   curl https://cli-assets.heroku.com/install.sh | sh
   ```
-- Make sure [Docker](https://docs.docker.com/get-docker/) is installed and running locally.
 
 #### 2. Clone the Repository
 ```bash
@@ -129,35 +127,39 @@ git clone https://github.com/aquib4040/azml-go.git
 cd azml-go
 ```
 
-#### 3. Log In to Heroku and Container Registry
+#### 3. Log In to Heroku
 ```bash
 heroku login
-heroku container:login
 ```
 
-#### 4. Create Heroku App
+#### 4. Create Heroku App with Container Stack
 ```bash
-heroku create your-app-name
+# If creating a new app:
+heroku apps:create your-app-name --stack=container
+
+# Or if linking an existing app:
+heroku git:remote -a your-app-name
+heroku stack:set container -a your-app-name
 ```
-*(Or link an existing app: `heroku git:remote -a your-app-name`)*
 
 #### 5. Configure Environment Variables
-Set your mandatory configuration variables on Heroku:
+Set your configuration variables on Heroku:
 ```bash
-heroku config:set BOT_TOKEN="your_bot_token"
-heroku config:set OWNER_ID="your_telegram_id"
-heroku config:set TELEGRAM_API="your_api_id"
-heroku config:set TELEGRAM_HASH="your_api_hash"
-heroku config:set BASE_URL_PORT="23434"
+# Grab your live App Web URL to use as BASE_URL
+APP_URL=$(heroku apps:info -a your-app-name --json | jq -r '.app.web_url')
+
+# Set configuration variables
+heroku config:set BOT_TOKEN="your_bot_token" -a your-app-name
+heroku config:set OWNER_ID="your_telegram_id" -a your-app-name
+heroku config:set TELEGRAM_API="your_api_id" -a your-app-name
+heroku config:set TELEGRAM_HASH="your_api_hash" -a your-app-name
+heroku config:set BASE_URL="$APP_URL" -a your-app-name
 ```
 
-#### 6. Build and Release Docker Container
+#### 6. Deploy Code (Remote Docker Build on Heroku)
+When pushing to Heroku git, Heroku detects `heroku.yml` and builds the Docker container directly on their servers:
 ```bash
-# Push container image to Heroku
-heroku container:push web -a your-app-name
-
-# Release and start the application
-heroku container:release web -a your-app-name
+git push heroku master
 ```
 
 #### 7. View Live Logs
@@ -167,7 +169,33 @@ heroku logs --tail -a your-app-name
 
 ---
 
-### Method 2: Deploy on Linux VPS (Docker Compose - Recommended)
+### Method 2: Automated GitHub Actions CI/CD (Heroku)
+
+`AZML-Go` includes a continuous deployment workflow ([`.github/workflows/cd.yml`](.github/workflows/cd.yml)) that automatically deploys to Heroku on every push to `master`.
+
+#### What the CD Pipeline Automates:
+1. Verifies if your Heroku app exists; if not, it automatically creates it with `--stack=container`.
+2. Captures the live Heroku web URL and assigns it as `BASE_URL`.
+3. Configures all main environment variables on Heroku.
+4. Pushes the code to Heroku's Git repository to trigger the server-side Docker build.
+
+#### Required GitHub Repository Secrets:
+Go to your GitHub repository **Settings** ➔ **Secrets and variables** ➔ **Actions** and add:
+
+| Secret Name | Description / Source |
+|---|---|
+| `HEROKU_API_KEY` | Your Heroku API key (run `heroku auth:token` in terminal) |
+| `HEROKU_EMAIL` | Your Heroku account email address |
+| `HEROKU_APP_NAME` | Your Heroku app name (e.g. `radiant-savannah-50281`) |
+| `BOT_TOKEN` | Telegram Bot token from [@BotFather](https://t.me/BotFather) |
+| `OWNER_ID` | Your Telegram User ID |
+| `TELEGRAM_API` | Telegram API ID from [my.telegram.org](https://my.telegram.org) |
+| `TELEGRAM_HASH` | Telegram API Hash from [my.telegram.org](https://my.telegram.org) |
+| `DATABASE_URL` | *(Optional)* MongoDB connection string |
+
+---
+
+### Method 3: Deploy on Linux VPS (Docker Compose - Recommended)
 
 The simplest and most resilient way to run `AZML-Go` on Ubuntu/Debian or any Linux server.
 
@@ -308,9 +336,9 @@ docker compose down
 
 | | |
 |:---:|:---:|
-| <img width="80" src="https://avatars.githubusercontent.com/u/200465492?v=4"> | <img width="80" src="https://avatars.githubusercontent.com/u/97157730?v=4"> |
-| [`Aquib`](https://github.com/aquib4040) | [`Utkarsh`](https://github.com/utkarshdubey2008) |
-| Author & Maintainer [AZML-Go] | Original Creator [AZML] |
+| <img width="80" src="https://github.com/aquib4040.png"> | <img width="80" src="https://github.com/isseisenpai0.png"> |
+| [`Aquib`](https://github.com/aquib4040) | [`issei`](https://github.com/isseisenpai0) |
+| Founder & Author | Maintainer |
 
 - **Gotd Team**: For the pure Go [Gotd MTProto library](https://github.com/gotd/td).
 - **AZML Python**: Architectural inspiration and feature design.

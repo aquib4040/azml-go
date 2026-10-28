@@ -1,0 +1,92 @@
+name: Continuous Deployment (Heroku)
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: cd-heroku-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Heroku
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Heroku CLI
+        run: |
+          curl https://cli-assets.heroku.com/install.sh | sh
+
+      - name: Configure Heroku and Environment
+        id: setup-heroku
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          HEROKU_EMAIL: ${{ secrets.HEROKU_EMAIL }}
+          HEROKU_APP_NAME: ${{ secrets.HEROKU_APP_NAME }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          TELEGRAM_API: ${{ secrets.TELEGRAM_API }}
+          TELEGRAM_HASH: ${{ secrets.TELEGRAM_HASH }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$HEROKU_API_KEY" ] || [ -z "$HEROKU_APP_NAME" ]; then
+            echo "::error::HEROKU_API_KEY and HEROKU_APP_NAME must be set in repository secrets."
+            exit 1
+          fi
+
+          # Configure netrc for Heroku CLI and Git authentication
+          cat > ~/.netrc <<EOF
+          machine api.heroku.com
+            login ${HEROKU_EMAIL:-heroku}
+            password $HEROKU_API_KEY
+          machine git.heroku.com
+            login ${HEROKU_EMAIL:-heroku}
+            password $HEROKU_API_KEY
+          EOF
+          chmod 600 ~/.netrc
+
+          # Check if the app exists; if not, create it
+          if heroku apps:info -a "$HEROKU_APP_NAME" > /dev/null 2>&1; then
+            echo "App '$HEROKU_APP_NAME' exists. Ensuring stack is set to container..."
+            heroku stack:set container -a "$HEROKU_APP_NAME" || true
+          else
+            echo "App '$HEROKU_APP_NAME' does not exist. Creating with container stack..."
+            heroku apps:create "$HEROKU_APP_NAME" --stack=container
+          fi
+
+          # Grab App Web URL to use as BASE_URL
+          APP_WEB_URL=$(heroku apps:info -a "$HEROKU_APP_NAME" --json | jq -r '.app.web_url // empty')
+          echo "Captured App URL: $APP_WEB_URL"
+
+          # Prepare config vars
+          CONFIG_VARS=()
+          [ -n "$APP_WEB_URL" ] && CONFIG_VARS+=("BASE_URL=$APP_WEB_URL")
+          [ -n "$BOT_TOKEN" ] && CONFIG_VARS+=("BOT_TOKEN=$BOT_TOKEN")
+          [ -n "$OWNER_ID" ] && CONFIG_VARS+=("OWNER_ID=$OWNER_ID")
+          [ -n "$TELEGRAM_API" ] && CONFIG_VARS+=("TELEGRAM_API=$TELEGRAM_API")
+          [ -n "$TELEGRAM_HASH" ] && CONFIG_VARS+=("TELEGRAM_HASH=$TELEGRAM_HASH")
+          [ -n "$DATABASE_URL" ] && CONFIG_VARS+=("DATABASE_URL=$DATABASE_URL")
+          CONFIG_VARS+=("GODEBUG=madvdontneed=1")
+
+          if [ ${#CONFIG_VARS[@]} -gt 0 ]; then
+            echo "Configuring environment variables on Heroku..."
+            heroku config:set "${CONFIG_VARS[@]}" -a "$HEROKU_APP_NAME"
+          fi
+
+      - name: Deploy to Heroku Remote Git (Server Docker Build)
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          HEROKU_APP_NAME: ${{ secrets.HEROKU_APP_NAME }}
+        run: |
+          git remote add heroku "https://heroku:$HEROKU_API_KEY@git.heroku.com/$HEROKU_APP_NAME.git" || git remote set-url heroku "https://heroku:$HEROKU_API_KEY@git.heroku.com/$HEROKU_APP_NAME.git"
+          echo "Pushing code to Heroku for remote Docker build via heroku.yml..."
+          git push heroku HEAD:master --force
