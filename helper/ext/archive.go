@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -93,10 +94,60 @@ func DetectArchiveByBinaryHeader(filePath string) (bool, ArchiveType) {
 	return false, ArchiveNone
 }
 
+var (
+	firstSplitRegex = regexp.MustCompile(`(?i)(\.|_)(part0*1\.rar|7z\.0*1|zip\.0*1)$`)
+	partRarRegex    = regexp.MustCompile(`(?i)(\.|_)part\d+\.rar$`)
+	splitRegex      = regexp.MustCompile(`(?i)\.r\d+$|\.7z\.\d+$|\.z\d+$|\.zip\.\d+$`)
+)
+
+// IsFirstArchiveSplit checks if the file is the first part of a split archive or a standalone/main RAR.
+func IsFirstArchiveSplit(filePath string) bool {
+	base := filepath.Base(filePath)
+	if firstSplitRegex.MatchString(base) {
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(base), ".rar") && !partRarRegex.MatchString(base) {
+		return true
+	}
+	return false
+}
+
+// IsArchiveSplit checks if the file is a part of a split archive.
+func IsArchiveSplit(filePath string) bool {
+	base := filepath.Base(filePath)
+	return splitRegex.MatchString(base) || partRarRegex.MatchString(base)
+}
+
+// GetArchiveBaseName returns the base name of an archive, stripping split suffixes or archive extensions.
+func GetArchiveBaseName(filePath string) string {
+	name := filepath.Base(filePath)
+	if IsFirstArchiveSplit(name) {
+		loc := regexp.MustCompile(`(?i)(\.|_)(part0*1\.rar|7z\.0*1|zip\.0*1)$`).FindStringIndex(name)
+		if len(loc) == 2 {
+			return name[:loc[0]]
+		}
+	}
+	ext := filepath.Ext(name)
+	if ext != "" {
+		lower := strings.ToLower(name)
+		for _, sfx := range []string{".tar.gz", ".tar.xz", ".tar.bz2"} {
+			if strings.HasSuffix(lower, sfx) {
+				return name[:len(name)-len(sfx)]
+			}
+		}
+		return strings.TrimSuffix(name, ext)
+	}
+	return name
+}
+
 // IsArchive checks both binary magic header and common file extensions.
 func IsArchive(filePath string) (bool, ArchiveType) {
 	if isArch, archType := DetectArchiveByBinaryHeader(filePath); isArch {
 		return true, archType
+	}
+
+	if IsFirstArchiveSplit(filePath) || IsArchiveSplit(filePath) {
+		return true, Archive7z
 	}
 
 	ext := strings.ToLower(filepath.Ext(filePath))
@@ -182,7 +233,31 @@ func InspectArchiveSafety(archivePath, password string) (uncompressedSize int64,
 	return uncompressedSize, fileCount, false, nil
 }
 
-// ForceExtractArchive extracts any archive using 7z with Zip Bomb and disk safety checks.
+func findHatchZipBin() string {
+	if p, err := exec.LookPath("hatchzip"); err == nil {
+		return p
+	}
+	if p, err := exec.LookPath("hz"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// GetExtractEngineName returns "HatchZip" if hatchzip or hz binary is found, otherwise "7-Zip".
+func GetExtractEngineName() string {
+	if findHatchZipBin() != "" {
+		return "HatchZip"
+	}
+	return "7-Zip"
+}
+
+func cleanHatchZipMeta(archivePath string) {
+	_ = os.Remove(archivePath + ".hatchzip")
+	_ = os.Remove(archivePath + ".hatchzip-tail")
+}
+
+// ForceExtractArchive extracts any archive using in-place HatchZip (with auto-restore)
+// and falls back to 7z with Zip Bomb and disk safety checks.
 func ForceExtractArchive(archivePath, targetDir, password string) (string, error) {
 	// 1. Zip Bomb & Safety Pre-check
 	uncompressedSize, count, isBomb, _ := InspectArchiveSafety(archivePath, password)
@@ -199,6 +274,31 @@ func ForceExtractArchive(archivePath, targetDir, password string) (string, error
 
 	_ = os.MkdirAll(targetDir, 0755)
 
+	// 3. Attempt HatchZip in-place extraction for disk savings
+	hzBin := findHatchZipBin()
+	if hzBin != "" {
+		hzArgs := []string{"extract", archivePath, "-o", targetDir, "-y", "--replace"}
+		if password != "" {
+			hzArgs = append(hzArgs, "-p", password)
+		}
+
+		log.Printf("[ARCHIVE] Attempting HatchZip in-place extraction: %s -> %s...", archivePath, targetDir)
+		hzCmd := exec.Command(hzBin, hzArgs...)
+		hzOutput, hzErr := hzCmd.CombinedOutput()
+		if hzErr == nil {
+			log.Printf("[ARCHIVE] HatchZip in-place extraction successful for: %s", archivePath)
+			cleanHatchZipMeta(archivePath)
+			return targetDir, nil
+		}
+
+		log.Printf("[ARCHIVE] HatchZip failed (err: %v, output: %s). Attempting to restore archive and falling back to 7z...",
+			hzErr, strings.TrimSpace(string(hzOutput)))
+		restoreCmd := exec.Command(hzBin, "restore", archivePath, "-o", targetDir, "-q")
+		_ = restoreCmd.Run()
+		cleanHatchZipMeta(archivePath)
+	}
+
+	// 4. Fallback: 7-Zip extraction
 	args := []string{"x", "-y", archivePath, "-o" + targetDir, "-aot", "-xr!@PaxHeader"}
 	if password != "" {
 		args = append(args, "-p"+password)
@@ -206,7 +306,7 @@ func ForceExtractArchive(archivePath, targetDir, password string) (string, error
 		args = append(args, "-p-") // Do not prompt for password
 	}
 
-	log.Printf("[ARCHIVE] Force extracting %s (uncompressed: %s, %d files) -> %s...",
+	log.Printf("[ARCHIVE] Falling back to 7z extraction for %s (uncompressed: %s, %d files) -> %s...",
 		archivePath, GetReadableFileSize(uncompressedSize), count, targetDir)
 	cmd := exec.Command("7z", args...)
 	output, err := cmd.CombinedOutput()
@@ -215,7 +315,8 @@ func ForceExtractArchive(archivePath, targetDir, password string) (string, error
 		return "", fmt.Errorf("extraction failed: %v (%s)", err, strings.TrimSpace(string(output)))
 	}
 
-	log.Printf("[ARCHIVE] Extraction successful for %s", archivePath)
+	cleanHatchZipMeta(archivePath)
+	log.Printf("[ARCHIVE] 7z extraction successful for %s", archivePath)
 	return targetDir, nil
 }
 

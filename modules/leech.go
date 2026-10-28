@@ -977,13 +977,15 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 	// 2. Post-processing: Forceful Archive Extraction (/leech -e, -extract, -uz, -p)
 	// Reads binary magic bytes (PK, 7z, Rar!, etc.) even if the file extension was disguised or missed
 	if opt.IsExtract {
-		uTask.SetStatus(types.StatusExtracting, "7-Zip")
+		uTask.SetStatus(types.StatusExtracting, ext.GetExtractEngineName())
 		isArch, archType := ext.IsArchive(downloadedPath)
 		if isArch {
 			log.Printf("[LEECH -e] Detected archive format '%s' via binary header for: %s", archType, downloadedPath)
 			extractDir := filepath.Join(taskDir, "extracted")
 			if outDir, err := ext.ForceExtractArchive(downloadedPath, extractDir, opt.Password); err == nil {
 				_ = os.Remove(downloadedPath)
+				_ = os.Remove(downloadedPath + ".hatchzip")
+				_ = os.Remove(downloadedPath + ".hatchzip-tail")
 				downloadedPath = outDir
 			} else {
 				log.Printf("[LEECH -e] Extraction error: %v, continuing with original file", err)
@@ -997,6 +999,8 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 						extDir := filepath.Join(filepath.Dir(p), "extracted")
 						if _, eErr := ext.ForceExtractArchive(p, extDir, opt.Password); eErr == nil {
 							_ = os.Remove(p)
+							_ = os.Remove(p + ".hatchzip")
+							_ = os.Remove(p + ".hatchzip-tail")
 						}
 					}
 				}
