@@ -9,16 +9,13 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /usr/local/bin/azml-go .
 
-FROM aquib4040/azml:go
+FROM aquib4040/azmlgo:latest
 
 ENV GODEBUG="madvdontneed=1"
 
 WORKDIR /usr/src/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends speedtest-cli curl && rm -rf /var/lib/apt/lists/*
-
-COPY . .
-
 RUN mkdir -p /usr/src/app/downloads /usr/src/app/Thumbnails && chmod -R 777 /usr/src/app
 
 COPY --from=builder /usr/local/bin/azml-go /usr/local/bin/azml-go

@@ -1,0 +1,29 @@
+# Git
+.git
+.github
+
+# Sensitive credentials & environment files
+.env
+config.env
+*.env
+token.pickle
+accounts.zip
+cookies.txt
+shorteners.txt
+terabox.txt
+.netrc
+
+# Local binaries
+*.exe
+azml-go
+azml-go-*
+
+# Runtime data & downloads
+user_data.json
+downloads/
+Thumbnails/
+*.log
+
+# Testing & coverage
+coverage.*
+*.out
