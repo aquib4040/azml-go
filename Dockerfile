@@ -13,11 +13,13 @@ FROM aquib4040/azmlgo:latest
 
 ENV GODEBUG="madvdontneed=1"
 ENV TZ="Asia/Kolkata"
+ENV DEBIAN_FRONTEND="noninteractive"
 
 WORKDIR /usr/src/app
 
-# Install git, speedtest-cli, curl, ca-certificates, and tzdata for IST time in container
-RUN apt-get update && apt-get install -y --no-install-recommends git speedtest-cli curl ca-certificates tzdata && \
+# Install git, speedtest-cli, curl, ca-certificates, and tzdata without interactive debconf prompts
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git speedtest-cli curl ca-certificates tzdata && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     rm -rf /var/lib/apt/lists/*
 
