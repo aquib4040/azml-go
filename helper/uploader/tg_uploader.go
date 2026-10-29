@@ -274,9 +274,6 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			if err := floodCoord.WaitIfFlooded(ctx); err != nil {
 				return err
 			}
-			if err := floodCoord.Pace(ctx, 25*time.Millisecond); err != nil {
-				return err
-			}
 		}
 
 		partCtx, partCancel := context.WithTimeout(ctx, 35*time.Second)

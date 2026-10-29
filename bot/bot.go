@@ -36,6 +36,7 @@ type BotApp struct {
 	rawAPI      *tg.Client
 	userClient  *td.Client
 	userRawAPI  *tg.Client
+	userPool    td.CloseInvoker
 	userCancel  context.CancelFunc
 	userMu      sync.RWMutex
 	userUpdater func(userRawAPI *tg.Client)
@@ -267,6 +268,10 @@ func (b *BotApp) ReloadUserSession(ctx context.Context, sessionStr string) (stri
 			b.userCancel()
 			b.userCancel = nil
 		}
+		if b.userPool != nil {
+			_ = b.userPool.Close()
+			b.userPool = nil
+		}
 		b.userClient = nil
 		b.userRawAPI = nil
 		if b.uploader != nil {
@@ -331,9 +336,23 @@ func (b *BotApp) ReloadUserSession(ctx context.Context, sessionStr string) (stri
 		if b.userCancel != nil {
 			b.userCancel()
 		}
+		if b.userPool != nil {
+			_ = b.userPool.Close()
+			b.userPool = nil
+		}
 		b.userCancel = uCancel
 		b.userClient = newUserClient
-		b.userRawAPI = newUserClient.API()
+
+		// Create a 16-connection MTProto pool to bypass single TCP socket bottleneck
+		userPool, poolErr := newUserClient.Pool(16)
+		if poolErr == nil {
+			b.userPool = userPool
+			b.userRawAPI = tg.NewClient(userPool)
+			log.Printf("[AZML-Go User Client] Activated multi-connection MTProto pool (16 parallel TCP sockets)")
+		} else {
+			log.Printf("[AZML-Go User Client] Warning: failed to create 16-connection pool (%v); fallback to primary API", poolErr)
+			b.userRawAPI = newUserClient.API()
+		}
 
 		if b.uploader != nil {
 			b.uploader.SetUserClient(b.userRawAPI)
