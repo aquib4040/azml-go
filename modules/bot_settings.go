@@ -10,14 +10,18 @@ import (
 	"azml-go/config"
 	"azml-go/helper/ext"
 	"azml-go/helper/telegram"
+	"azml-go/helper/uploader"
 	"azml-go/types"
 
 	"github.com/gotd/td/tg"
 )
 
 type BotSettingsModule struct {
-	sender  *telegram.MessageSender
-	userMap *types.SafeUserMap
+	sender              *telegram.MessageSender
+	userMap             *types.SafeUserMap
+	userSessionReloader func(ctx context.Context, sessionStr string) (string, int64, bool, error)
+	uploader            *uploader.TelegramUploader
+	leechMod            *LeechModule
 }
 
 func NewBotSettingsModule(sender *telegram.MessageSender, userMap *types.SafeUserMap) *BotSettingsModule {
@@ -27,8 +31,22 @@ func NewBotSettingsModule(sender *telegram.MessageSender, userMap *types.SafeUse
 	}
 }
 
+func (m *BotSettingsModule) SetUserSessionReloader(fn func(ctx context.Context, sessionStr string) (string, int64, bool, error)) {
+	m.userSessionReloader = fn
+}
+
+func (m *BotSettingsModule) SetUploader(u *uploader.TelegramUploader) {
+	m.uploader = u
+}
+
+func (m *BotSettingsModule) SetLeechModule(l *LeechModule) {
+	m.leechMod = l
+}
+
 var configVarKeys = []string{
 	"OWNER_USERNAME",
+	"USER_SESSION_STRING",
+	"DUMP_CHAT_ID",
 	"LEECH_LOG_ID",
 	"STATUS_UPDATE_INTERVAL",
 	"STATUS_LIMIT",
@@ -56,10 +74,14 @@ var configVarKeys = []string{
 	"SHORTENER_API",
 	"SHORTENER_ENABLED",
 	"TOKEN_TIMEOUT",
+	"UPSTREAM_REPO",
+	"UPSTREAM_BRANCH",
 }
 
 var defaultVarValues = map[string]string{
 	"OWNER_USERNAME":               "exe_aquib",
+	"USER_SESSION_STRING":          "",
+	"DUMP_CHAT_ID":                 "0",
 	"LEECH_LOG_ID":                 "0",
 	"STATUS_UPDATE_INTERVAL":       "10",
 	"STATUS_LIMIT":                 "4",
@@ -87,6 +109,8 @@ var defaultVarValues = map[string]string{
 	"SHORTENER_API":                "",
 	"SHORTENER_ENABLED":            "true",
 	"TOKEN_TIMEOUT":                "0",
+	"UPSTREAM_REPO":                "https://github.com/aquib4040/azml-go",
+	"UPSTREAM_BRANCH":              "main",
 }
 
 func isBoolVar(key string) bool {
@@ -151,6 +175,27 @@ func (m *BotSettingsModule) HandleBotSettings(ctx context.Context, peer tg.Input
 	if len(parts) >= 3 {
 		key := strings.ToUpper(parts[1])
 		val := strings.Join(parts[2:], " ")
+		if key == "USER_SESSION_STRING" && m.userSessionReloader != nil {
+			uname, uid, isPrem, err := m.userSessionReloader(ctx, val)
+			if err != nil {
+				_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("× <b>Failed to set USER_SESSION_STRING:</b> <code>%v</code>", err), msg.MessageID, nil)
+				return
+			}
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>USER_SESSION_STRING</b> set successfully as @%s (ID: %d)! Premium: %v", uname, uid, isPrem), msg.MessageID, nil)
+			return
+		}
+		if key == "DUMP_CHAT_ID" {
+			dID, _ := strconv.ParseInt(val, 10, 64)
+			_ = config.UpdateConfigVar("DUMP_CHAT_ID", val)
+			if m.uploader != nil {
+				m.uploader.SetDumpChatID(dID)
+			}
+			if m.leechMod != nil {
+				m.leechMod.SetDumpChatID(dID)
+			}
+			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>DUMP_CHAT_ID</b> set to: <code>%d</code>", dID), msg.MessageID, nil)
+			return
+		}
 		if err := config.UpdateConfigVar(key, val); err == nil {
 			_, _ = m.sender.SendMessage(ctx, peer, fmt.Sprintf("✓ <b>%s</b> has been set to: <code>%s</code>", key, val), msg.MessageID, nil)
 			return
@@ -166,6 +211,8 @@ func (m *BotSettingsModule) buildMainMenu() (string, *telegram.ButtonMaker) {
 	btn := telegram.NewButtonMaker()
 	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Config Variables"), "botset var 0", "primary")
 	btn.Row()
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("User Session (4GB+)"), "botset session", "primary")
+	btn.Row()
 	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Private Files"), "botset private", "primary")
 	btn.Row()
 	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Aria2c Settings"), "botset aria", "primary")
@@ -174,6 +221,56 @@ func (m *BotSettingsModule) buildMainMenu() (string, *telegram.ButtonMaker) {
 	btn.Row()
 	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
 	btn.Row()
+	return text, btn
+}
+
+func (m *BotSettingsModule) buildSessionMenu() (string, *telegram.ButtonMaker) {
+	cfg := config.Get()
+	hasSession := cfg.UserSessionString != ""
+	isPrem := config.IsPremiumUser
+	maxSplit := config.GetMaxSplitSize()
+
+	status := "Not Configured (Standard 2GB Limit)"
+	if hasSession {
+		if isPrem {
+			status = "Active — Premium (4GB Uploads Enabled)"
+		} else {
+			status = "Active — Non-Premium (2GB Uploads)"
+		}
+	}
+
+	dumpInfo := "Not Set"
+	if cfg.DumpChatID != 0 {
+		dumpInfo = fmt.Sprintf("<code>%d</code>", cfg.DumpChatID)
+	}
+
+	text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+		"┠ <b>Status:</b> %s\n"+
+		"┠ <b>Max Split Size:</b> <code>%s</code>\n"+
+		"┠ <b>Dump Channel:</b> %s\n"+
+		"┠ <b>Session String:</b> <code>%s</code>\n"+
+		"┖ <b>Upload Flow:</b> <code>User String ➔ Dump Channel ➔ User DM</code>\n\n"+
+		"<i>Supported session string formats: Pyrogram (v1, v2), Pyrofork, Telethon, gotd</i>\n\n"+
+		"<i>Click <b>Set Session String</b> to save/update your user session for 4GB uploads:</i>",
+		telegram.ToSmallCaps("User Session Settings"),
+		status,
+		ext.GetReadableFileSize(maxSplit),
+		dumpInfo,
+		config.MaskSession(cfg.UserSessionString),
+	)
+
+	btn := telegram.NewButtonMaker()
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Set Session String"), "botset prompt_session", "primary")
+	if hasSession {
+		btn.IButtonStyled("• "+telegram.ToSmallCaps("Reset Session"), "botset resetsession", "danger")
+	}
+	btn.Row()
+	btn.IButtonStyled("◈ "+telegram.ToSmallCaps("Set Dump Channel"), "botset prompt_dump", "primary")
+	btn.Row()
+	btn.IButtonStyled("« "+telegram.ToSmallCaps("Back"), "botset back", "primary")
+	btn.IButtonStyled("× "+telegram.ToSmallCaps("Close"), "botset close", "danger")
+	btn.Row()
+
 	return text, btn
 }
 
@@ -291,6 +388,67 @@ func (m *BotSettingsModule) buildVarDetailMenu(key string, page int, editing boo
 
 func (m *BotSettingsModule) HandleSessionValue(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int) {
 	val = strings.TrimSpace(val)
+
+	if key == "USER_SESSION_STRING" {
+		if m.userSessionReloader != nil {
+			uname, uid, isPrem, err := m.userSessionReloader(ctx, val)
+			if err != nil {
+				errMsg := fmt.Sprintf("\n\n× <b>Failed to connect User Session:</b> <code>%v</code>\n<i>Please check that the session string is valid and active.</i>", err)
+				if page == -2 {
+					text, btn := m.buildSessionMenu()
+					text += errMsg
+					if m.sender != nil {
+						_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+					}
+				} else {
+					text, btn := m.buildVarDetailMenu(key, page, false)
+					text += errMsg
+					if m.sender != nil {
+						_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+					}
+				}
+				return
+			}
+
+			successMsg := fmt.Sprintf("\n\n✓ <b>User Session connected!</b>\n┠ <b>User:</b> @%s (ID: %d)\n┠ <b>Premium:</b> %v\n┠ <b>Max Split:</b> %s\n┖ <b>Upload Flow:</b> <code>User String ➔ Dump Channel ➔ User DM</code>",
+				uname, uid, isPrem, ext.GetReadableFileSize(config.GetMaxSplitSize()))
+
+			if page == -2 {
+				text, btn := m.buildSessionMenu()
+				text += successMsg
+				if m.sender != nil {
+					_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+				}
+			} else {
+				text, btn := m.buildVarDetailMenu(key, page, false)
+				text += successMsg
+				if m.sender != nil {
+					_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+				}
+			}
+			return
+		}
+	}
+
+	if key == "DUMP_CHAT_ID" {
+		dID, _ := strconv.ParseInt(val, 10, 64)
+		_ = config.UpdateConfigVar("DUMP_CHAT_ID", val)
+		if m.uploader != nil {
+			m.uploader.SetDumpChatID(dID)
+		}
+		if m.leechMod != nil {
+			m.leechMod.SetDumpChatID(dID)
+		}
+		if page == -2 {
+			text, btn := m.buildSessionMenu()
+			text += fmt.Sprintf("\n\n✓ <b>Dump Channel set to:</b> <code>%d</code>", dID)
+			if m.sender != nil {
+				_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+			}
+			return
+		}
+	}
+
 	if key == "TOKEN_TIMEOUT" && page == -1 {
 		sec := parseDurationSec(val)
 		if sec > 0 {
@@ -306,25 +464,41 @@ func (m *BotSettingsModule) HandleSessionValue(ctx context.Context, peer tg.Inpu
 	if page == -1 || key == "SHORTENER" || key == "SHORTENER_API" {
 		text, btn := m.buildShortenerMenu()
 		text += fmt.Sprintf("\n\n✓ <i>%s updated successfully!</i>", key)
-		_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		if m.sender != nil {
+			_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		}
 		return
 	}
 
 	text, btn := m.buildVarDetailMenu(key, page, false)
 	text += "\n\n✓ <i>Value updated successfully!</i>"
-	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+	if m.sender != nil {
+		_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+	}
 }
 
 func (m *BotSettingsModule) HandleSessionCancelled(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key string, page int) {
+	if page == -2 {
+		text, btn := m.buildSessionMenu()
+		text += "\n\n× <i>Edit cancelled.</i>"
+		if m.sender != nil {
+			_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		}
+		return
+	}
 	if page == -1 || key == "SHORTENER" || key == "SHORTENER_API" {
 		text, btn := m.buildShortenerMenu()
 		text += "\n\n× <i>Edit cancelled.</i>"
-		_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		if m.sender != nil {
+			_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+		}
 		return
 	}
 	text, btn := m.buildVarDetailMenu(key, page, false)
 	text += "\n\n× <i>Edit cancelled.</i>"
-	_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+	if m.sender != nil {
+		_ = m.sender.EditMessageWithButtons(ctx, peer, promptMsgID, text, btn, 2)
+	}
 }
 
 func (m *BotSettingsModule) buildAriaMenu() (string, *telegram.ButtonMaker) {
@@ -446,12 +620,59 @@ func (m *BotSettingsModule) HandleCallback(ctx context.Context, peer tg.InputPee
 				page, _ = strconv.Atoi(parts[3])
 			}
 			defVal := defaultVarValues[key]
-			_ = config.UpdateConfigVar(key, defVal)
+			if key == "USER_SESSION_STRING" && m.userSessionReloader != nil {
+				_, _, _, _ = m.userSessionReloader(ctx, "")
+			} else {
+				_ = config.UpdateConfigVar(key, defVal)
+			}
 			text, btn := m.buildVarDetailMenu(key, page, false)
 			text += fmt.Sprintf("\n\n• <i>%s reset to default: %s</i>", key, defVal)
 			_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
 			_ = m.sender.AnswerCallback(ctx, queryID, fmt.Sprintf("%s reset to default", key), false)
 		}
+
+	case "session":
+		ext.ClearPendingBotSettingSession(fromUID)
+		text, btn := m.buildSessionMenu()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		_ = m.sender.AnswerCallback(ctx, queryID, "", false)
+
+	case "prompt_session":
+		ext.SetPendingBotSettingSession(fromUID, "USER_SESSION_STRING", 0, msgID, -2, 60*time.Second)
+		text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"Send your Pyrogram (v1/v2), Pyrofork, Telethon, or gotd session string in chat.\n\n"+
+			"<b>Timeout:</b> 60 sec\n<i>Send /cancel to abort.</i>",
+			telegram.ToSmallCaps("Set User Session String"))
+		btn := telegram.NewButtonMaker()
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), "botset session", "danger")
+		btn.Row()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 1)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send session string in chat...", false)
+
+	case "resetsession":
+		ext.ClearPendingBotSettingSession(fromUID)
+		if m.userSessionReloader != nil {
+			_, _, _, _ = m.userSessionReloader(ctx, "")
+		} else {
+			_ = config.UpdateConfigVar("USER_SESSION_STRING", "")
+			config.SetIsPremiumUser(false)
+		}
+		text, btn := m.buildSessionMenu()
+		text += "\n\n• <i>User Session removed. Reverted to standard 2GB limits.</i>"
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 2)
+		_ = m.sender.AnswerCallback(ctx, queryID, "User session reset", false)
+
+	case "prompt_dump":
+		ext.SetPendingBotSettingSession(fromUID, "DUMP_CHAT_ID", 0, msgID, -2, 60*time.Second)
+		text := fmt.Sprintf("⌬ <b><u>%s</u> :</b>\n\n"+
+			"Send the Dump Channel ID (e.g. <code>-100xxxxxxxxxx</code>) where 2GB+ files will be uploaded before forwarding to User DM.\n\n"+
+			"<b>Timeout:</b> 60 sec\n<i>Send /cancel to abort.</i>",
+			telegram.ToSmallCaps("Set Dump Channel"))
+		btn := telegram.NewButtonMaker()
+		btn.IButtonStyled("× "+telegram.ToSmallCaps("Cancel"), "botset session", "danger")
+		btn.Row()
+		_ = m.sender.EditMessageWithButtons(ctx, peer, msgID, text, btn, 1)
+		_ = m.sender.AnswerCallback(ctx, queryID, "Send Dump Channel ID in chat...", false)
 
 	case "aria":
 		text, btn := m.buildAriaMenu()

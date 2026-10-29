@@ -204,10 +204,32 @@ func (b *ButtonMaker) BuildMenu(cols int) tg.ReplyMarkupClass {
 				}
 			}
 
-			rowBtns = append(rowBtns, tg.KeyboardInlineButton{
+			kbtn := tg.KeyboardInlineButton{
 				Text: btn.Text,
 				Type: btnType,
-			})
+			}
+
+			if btn.Style != "" {
+				var kbStyle tg.KeyboardButtonStyle
+				hasStyle := false
+				switch strings.ToLower(btn.Style) {
+				case "primary", "bg_primary", "blue":
+					kbStyle.SetBgPrimary(true)
+					hasStyle = true
+				case "danger", "bg_danger", "red":
+					kbStyle.SetBgDanger(true)
+					hasStyle = true
+				case "success", "bg_success", "green":
+					kbStyle.SetBgSuccess(true)
+					hasStyle = true
+				}
+				if hasStyle {
+					kbStyle.SetFlags()
+					kbtn.SetStyle(kbStyle)
+				}
+			}
+
+			rowBtns = append(rowBtns, kbtn)
 		}
 		if len(rowBtns) > 0 {
 			rows = append(rows, tg.KeyboardInlineButtonRow{Buttons: rowBtns})

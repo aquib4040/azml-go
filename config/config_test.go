@@ -120,3 +120,46 @@ func TestCleanDir(t *testing.T) {
 		}
 	}
 }
+
+func TestMaskSession(t *testing.T) {
+	if got := MaskSession(""); got != "Not Set" {
+		t.Errorf("MaskSession(\"\") = %q; want %q", got, "Not Set")
+	}
+
+	short := "12345"
+	if got := MaskSession(short); got != "*** (Set)" {
+		t.Errorf("MaskSession(%q) = %q; want %q", short, got, "*** (Set)")
+	}
+
+	long := "1BVts999999999999999xyz123"
+	got := MaskSession(long)
+	if got != "1BVts9...z123 (Set)" {
+		t.Errorf("MaskSession(%q) = %q; want %q", long, got, "1BVts9...z123 (Set)")
+	}
+}
+
+func TestUpdateConfigVarUserSessionAndDump(t *testing.T) {
+	testSess := "1BVtsCustomSessionStringSample"
+	_ = UpdateConfigVar("USER_SESSION_STRING", testSess)
+	cfg := Get()
+	if cfg.UserSessionString != testSess {
+		t.Errorf("GlobalConfig.UserSessionString = %q; want %q", cfg.UserSessionString, testSess)
+	}
+
+	_ = UpdateConfigVar("DUMP_CHAT_ID", "-1001234567890")
+	if cfg.DumpChatID != -1001234567890 {
+		t.Errorf("GlobalConfig.DumpChatID = %d; want %d", cfg.DumpChatID, -1001234567890)
+	}
+
+	m := GetConfigMap()
+	if m["USER_SESSION_STRING"] != MaskSession(testSess) {
+		t.Errorf("GetConfigMap() USER_SESSION_STRING = %q; want %q", m["USER_SESSION_STRING"], MaskSession(testSess))
+	}
+	if m["DUMP_CHAT_ID"] != "-1001234567890" {
+		t.Errorf("GetConfigMap() DUMP_CHAT_ID = %q; want %q", m["DUMP_CHAT_ID"], "-1001234567890")
+	}
+
+	// Reset
+	_ = UpdateConfigVar("USER_SESSION_STRING", "")
+	_ = UpdateConfigVar("DUMP_CHAT_ID", "0")
+}

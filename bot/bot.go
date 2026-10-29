@@ -1,12 +1,9 @@
 package bot
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,6 +36,9 @@ type BotApp struct {
 	rawAPI      *tg.Client
 	userClient  *td.Client
 	userRawAPI  *tg.Client
+	userCancel  context.CancelFunc
+	userMu      sync.RWMutex
+	userUpdater func(userRawAPI *tg.Client)
 	dispatcher  tg.UpdateDispatcher
 	gaps        *updates.Manager
 	sender      *telegram.MessageSender
@@ -251,6 +251,119 @@ func (b *BotApp) SetBotSettingsHandlers(h func(ctx context.Context, peer tg.Inpu
 func (b *BotApp) SetBotSettingsInputHandlers(val func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key, val string, page int), cancel func(ctx context.Context, peer tg.InputPeerClass, promptMsgID int, key string, page int)) {
 	b.bsettingInputHandler = val
 	b.bsettingCancelHandler = cancel
+}
+
+func (b *BotApp) SetUserRawAPIUpdater(fn func(userRawAPI *tg.Client)) {
+	b.userUpdater = fn
+}
+
+func (b *BotApp) ReloadUserSession(ctx context.Context, sessionStr string) (string, int64, bool, error) {
+	b.userMu.Lock()
+	defer b.userMu.Unlock()
+
+	sessionStr = strings.TrimSpace(sessionStr)
+	if sessionStr == "" {
+		if b.userCancel != nil {
+			b.userCancel()
+			b.userCancel = nil
+		}
+		b.userClient = nil
+		b.userRawAPI = nil
+		if b.uploader != nil {
+			b.uploader.SetUserClient(nil)
+		}
+		if b.userUpdater != nil {
+			b.userUpdater(nil)
+		}
+		config.SetIsPremiumUser(false)
+		_ = config.UpdateConfigVar("USER_SESSION_STRING", "")
+		return "", 0, false, nil
+	}
+
+	uStorage, err := telegram.ParseSessionString(ctx, sessionStr)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("failed to parse session string: %w", err)
+	}
+
+	cfg := config.Get()
+	newUserClient := td.NewClient(cfg.TelegramAPI, cfg.TelegramHash, td.Options{
+		SessionStorage: uStorage,
+	})
+
+	uCtx, uCancel := context.WithCancel(context.Background())
+	type authResult struct {
+		user *tg.User
+		err  error
+	}
+	resCh := make(chan authResult, 1)
+
+	go func() {
+		_ = newUserClient.Run(uCtx, func(cCtx context.Context) error {
+			status, sErr := newUserClient.Auth().Status(cCtx)
+			if sErr != nil {
+				resCh <- authResult{err: sErr}
+				return sErr
+			}
+			if !status.Authorized {
+				resCh <- authResult{err: fmt.Errorf("session string is not authorized")}
+				return fmt.Errorf("session not authorized")
+			}
+			userSelf, selfErr := newUserClient.Self(cCtx)
+			if selfErr != nil {
+				resCh <- authResult{err: selfErr}
+				return selfErr
+			}
+			// Pre-warm MTProto connection pool, auth keys, and DC configuration
+			_, _ = newUserClient.API().HelpGetConfig(cCtx)
+			resCh <- authResult{user: userSelf}
+			<-cCtx.Done()
+			return cCtx.Err()
+		})
+	}()
+
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			uCancel()
+			return "", 0, false, fmt.Errorf("session login failed: %w", res.err)
+		}
+
+		if b.userCancel != nil {
+			b.userCancel()
+		}
+		b.userCancel = uCancel
+		b.userClient = newUserClient
+		b.userRawAPI = newUserClient.API()
+
+		if b.uploader != nil {
+			b.uploader.SetUserClient(b.userRawAPI)
+		}
+		if b.userUpdater != nil {
+			b.userUpdater(b.userRawAPI)
+		}
+
+		uname := res.user.Username
+		if uname == "" {
+			uname = res.user.FirstName
+		}
+		isPrem := res.user.Premium
+		config.SetIsPremiumUser(isPrem)
+		_ = config.UpdateConfigVar("USER_SESSION_STRING", sessionStr)
+
+		if isPrem {
+			log.Printf("[AZML-Go User Client] Activated User Session as @%s (ID: %d, PREMIUM ACTIVE: Max Split 3.91GB / 4GB enabled)", uname, res.user.ID)
+		} else {
+			log.Printf("[AZML-Go User Client] Activated User Session as @%s (ID: %d, NON-PREMIUM: Max Split 1.91GB)", uname, res.user.ID)
+		}
+		return uname, res.user.ID, isPrem, nil
+
+	case <-time.After(20 * time.Second):
+		uCancel()
+		return "", 0, false, fmt.Errorf("session connection timed out (20s)")
+	case <-ctx.Done():
+		uCancel()
+		return "", 0, false, ctx.Err()
+	}
 }
 func (b *BotApp) SetAuthorizeHandlers(auth, unauth, addSudo, rmSudo, addPrem, rmPrem, checkPrem func(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext)) {
 	b.authHandler = auth
@@ -731,40 +844,15 @@ func (b *BotApp) Start(ctx context.Context) error {
 	cfg := config.Get()
 
 	// Start user session client if configured
-	if b.userClient != nil {
+	if cfg.UserSessionString != "" {
 		go func() {
-			log.Println("[AZML-Go User Client] Starting user session client...")
-			_ = b.userClient.Run(ctx, func(uCtx context.Context) error {
-				status, err := b.userClient.Auth().Status(uCtx)
-				if err != nil {
-					log.Printf("[AZML-Go User Client] Auth status check error: %v", err)
-					return err
-				}
-				if status.Authorized {
-					userSelf, _ := b.userClient.Self(uCtx)
-					if userSelf != nil {
-						uname := userSelf.Username
-						if uname == "" {
-							uname = userSelf.FirstName
-						}
-						isPrem := userSelf.Premium
-						config.SetIsPremiumUser(isPrem)
-						if isPrem {
-							log.Printf("[AZML-Go User Client] Logged in successfully with User Session as @%s (ID: %d, PREMIUM ACTIVE: Max Split 3.91GB / 4GB upload enabled)", uname, userSelf.ID)
-						} else {
-							log.Printf("[AZML-Go User Client] Logged in successfully with User Session as @%s (ID: %d, NON-PREMIUM: Max Split 1.91GB)", uname, userSelf.ID)
-						}
-					} else {
-						config.SetIsPremiumUser(false)
-						log.Println("[AZML-Go User Client] Logged in successfully with User Session (NON-PREMIUM: Max Split 1.91GB)")
-					}
-				} else {
-					config.SetIsPremiumUser(false)
-					log.Println("[AZML-Go User Client] Session authorized status false (Max Split 1.91GB)")
-				}
-				<-uCtx.Done()
-				return uCtx.Err()
-			})
+			log.Println("[AZML-Go User Client] Pre-warming User Session from DB/Config...")
+			uname, uid, isPrem, err := b.ReloadUserSession(context.Background(), cfg.UserSessionString)
+			if err != nil {
+				log.Printf("[AZML-Go User Client] Startup login error for USER_SESSION_STRING: %v", err)
+			} else {
+				log.Printf("[AZML-Go User Client] User session active and pre-warmed on start: @%s (ID: %d, Premium: %v, Workers: 16)", uname, uid, isPrem)
+			}
 		}()
 	} else {
 		config.SetIsPremiumUser(false)
@@ -846,66 +934,33 @@ func (b *BotApp) sendStartupNotification(ctx context.Context) {
 					"┠ <b>TimeZone:</b> %s\n"+
 					"┖ <b>Version:</b> <code>1.0.0</code>", dateStr, timeStr, timz)
 
-				botToken := cfg.BotToken
-				if botToken != "" {
-					url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken)
-					payload := map[string]interface{}{
-						"chat_id":    chatID,
-						"message_id": msgID,
-						"text":       restartSuccessText,
-						"parse_mode": "HTML",
-					}
-					body, _ := json.Marshal(payload)
-					_, _ = http.Post(url, "application/json", bytes.NewReader(body))
+				peer := b.getPeerForChatID(chatID)
+				if b.sender != nil && peer != nil {
+					_ = b.sender.EditMessage(ctx, peer, msgID, restartSuccessText, nil)
 				}
 				return
 			}
 		}
 	}
 
-	// 2. Otherwise send Bot Started Successfully notification to Authorized Chats (GC) or Owner
+	// 2. Otherwise send Bot Started Successfully notification to Authorized Chats (GC) or Owner via MTProto
 	startMsg := fmt.Sprintf("⌬ <b><i>Bot Started Successfully!</i></b>\n"+
 		"┠ <b>Date:</b> %s\n"+
 		"┠ <b>Time:</b> %s\n"+
 		"┠ <b>TimeZone:</b> %s\n"+
 		"┖ <b>Version:</b> <code>1.0.0</code>", dateStr, timeStr, timz)
 
-	botToken := cfg.BotToken
-	if botToken == "" {
-		botToken = os.Getenv("BOT_TOKEN")
-	}
-	if botToken == "" {
-		log.Println("[AZML-Go Bot Client] Warning: BOT_TOKEN is empty, cannot send startup notification via Bot API")
-		return
-	}
-
-	sendViaBotAPI := func(targetID int64) {
-		if targetID == 0 {
+	sendNotification := func(targetID int64) {
+		if targetID == 0 || b.sender == nil {
 			return
 		}
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
-		payload := map[string]interface{}{
-			"chat_id":                  targetID,
-			"text":                     startMsg,
-			"parse_mode":               "HTML",
-			"disable_web_page_preview": true,
-		}
-		body, _ := json.Marshal(payload)
-		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
-		if err != nil {
-			log.Printf("[AZML-Go Bot Client] Error sending startup message to %d: %v", targetID, err)
-			return
-		}
-		defer resp.Body.Close()
-		var res struct {
-			Ok          bool   `json:"ok"`
-			Description string `json:"description"`
-		}
-		if json.NewDecoder(resp.Body).Decode(&res) == nil {
-			if res.Ok {
-				log.Printf("[AZML-Go Bot Client] Startup notification sent to %d successfully!", targetID)
+		peer := b.getPeerForChatID(targetID)
+		if peer != nil {
+			_, err := b.sender.SendMessage(ctx, peer, startMsg, 0, nil)
+			if err != nil {
+				log.Printf("[AZML-Go Bot Client] Error sending startup message to %d: %v", targetID, err)
 			} else {
-				log.Printf("[AZML-Go Bot Client] Failed to send startup notification to %d: %s", targetID, res.Description)
+				log.Printf("[AZML-Go Bot Client] Startup notification sent to %d successfully via MTProto!", targetID)
 			}
 		}
 	}
@@ -915,13 +970,13 @@ func (b *BotApp) sendStartupNotification(ctx context.Context) {
 	for _, chatID := range cfg.AuthorizedChats {
 		if chatID != 0 {
 			log.Printf("[AZML-Go Bot Client] Sending startup notification to Authorized Group/Chat: %d", chatID)
-			sendViaBotAPI(chatID)
+			sendNotification(chatID)
 			sentToAny = true
 		}
 	}
 	if !sentToAny && cfg.OwnerID != 0 {
 		log.Printf("[AZML-Go Bot Client] No authorized chats configured; sending startup notification to Owner: %d", cfg.OwnerID)
-		sendViaBotAPI(cfg.OwnerID)
+		sendNotification(cfg.OwnerID)
 	}
 }
 

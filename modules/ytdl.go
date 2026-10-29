@@ -264,10 +264,11 @@ func (m *YtdlModule) processYtdl(peer tg.InputPeerClass, msg *types.MessageConte
 		ThumbPath:  thumbPath,
 		CoverPath:  coverPath,
 		AsDoc:      asDoc,
-		DumpChatID: dumpID,
-		LogChatID:  cfg.LeechLogID,
-		UserID:     msg.UserID,
-		BotPM:      botPM,
+		DumpChatID:     dumpID,
+		LogChatID:      cfg.LeechLogID,
+		UserID:         msg.UserID,
+		UserAccessHash: telegram.GetUserAccessHash(msg.UserID),
+		BotPM:          botPM,
 		IsPremium:  isPremium,
 		OnProgress: func(curr, total int64, speed float64, eta string) {
 			if speed > maxULSpeed {

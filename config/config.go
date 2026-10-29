@@ -86,6 +86,9 @@ type Config struct {
 	StorageThreshold          int64 // GB
 	WorkerBotTokens           []string
 	DumpChatID                int64
+	UpstreamRepo              string
+	UpstreamBranch            string
+	UpdateOnStartup           bool
 }
 
 var (
@@ -93,7 +96,16 @@ var (
 	configLock    sync.RWMutex
 	MaxSplitSize  int64 = 2097152000 // 1.91 GB default
 	IsPremiumUser bool  = false
+
+	configUpdatedHookMu sync.RWMutex
+	configUpdatedHook   func(key, val string)
 )
+
+func SetOnConfigVarUpdated(fn func(key, val string)) {
+	configUpdatedHookMu.Lock()
+	defer configUpdatedHookMu.Unlock()
+	configUpdatedHook = fn
+}
 
 func SetIsPremiumUser(isPrem bool) {
 	configLock.Lock()
@@ -196,6 +208,9 @@ func LoadConfig(path string) (*Config, error) {
 		DailyTaskLimit:            getEnvInt("DAILY_TASK_LIMIT", 0),
 		StorageThreshold:          getEnvInt64("STORAGE_THRESHOLD", 1), // Default 1GB safety cushion
 		DumpChatID:                getEnvInt64("DUMP_CHAT_ID", getEnvInt64("BIN_CHANNEL", getEnvInt64("STORAGE_CHANNEL", getEnvInt64("STORAGE_CHANNELS", getEnvInt64("LEECH_LOG_ID", 0))))),
+		UpstreamRepo:              getEnv("UPSTREAM_REPO", "https://github.com/aquib4040/azml-go"),
+		UpstreamBranch:            getEnv("UPSTREAM_BRANCH", "main"),
+		UpdateOnStartup:           getEnvBool("UPDATE_ON_STARTUP", false),
 	}
 
 	// Resolve main bot token
@@ -433,10 +448,78 @@ func UpdateConfigVar(key, val string) error {
 		GlobalConfig.DailyLeechLimit, _ = strconv.ParseInt(val, 10, 64)
 	case "DAILY_TASK_LIMIT":
 		GlobalConfig.DailyTaskLimit, _ = strconv.Atoi(val)
+	case "USER_SESSION_STRING":
+		GlobalConfig.UserSessionString = strings.TrimSpace(val)
+	case "DUMP_CHAT_ID":
+		GlobalConfig.DumpChatID, _ = strconv.ParseInt(strings.TrimSpace(val), 10, 64)
 	case "STORAGE_THRESHOLD":
 		GlobalConfig.StorageThreshold, _ = strconv.ParseInt(val, 10, 64)
+	case "UPSTREAM_REPO":
+		GlobalConfig.UpstreamRepo = strings.TrimSpace(val)
+	case "UPSTREAM_BRANCH":
+		GlobalConfig.UpstreamBranch = strings.TrimSpace(val)
 	}
+
+	_ = os.Setenv(key, val)
+	_ = saveVarToFile("config.env", key, val)
+	if _, err := os.Stat(".env"); err == nil {
+		_ = saveVarToFile(".env", key, val)
+	}
+
+	configUpdatedHookMu.RLock()
+	hook := configUpdatedHook
+	configUpdatedHookMu.RUnlock()
+	if hook != nil {
+		hook(key, val)
+	}
+
 	return nil
+}
+
+func MaskSession(sess string) string {
+	sess = strings.TrimSpace(sess)
+	if sess == "" {
+		return "Not Set"
+	}
+	if len(sess) > 12 {
+		return sess[:6] + "..." + sess[len(sess)-4:] + " (Set)"
+	}
+	return "*** (Set)"
+}
+
+func saveVarToFile(filename, key, val string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			content := fmt.Sprintf("%s=%s\n", key, val)
+			return os.WriteFile(filename, []byte(content), 0644)
+		}
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	found := false
+	targetPrefix := key + "="
+	targetPrefixSpace := key + " "
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, targetPrefix) || strings.HasPrefix(trimmed, targetPrefixSpace) {
+			lines[i] = fmt.Sprintf("%s=%s", key, val)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		lines = append(lines, fmt.Sprintf("%s=%s", key, val))
+	}
+
+	output := strings.Join(lines, "\n")
+	return os.WriteFile(filename, []byte(output), 0644)
 }
 
 func GetConfigMap() map[string]string {
@@ -445,6 +528,8 @@ func GetConfigMap() map[string]string {
 
 	return map[string]string{
 		"OWNER_USERNAME":               GlobalConfig.OwnerUsername,
+		"USER_SESSION_STRING":         MaskSession(GlobalConfig.UserSessionString),
+		"DUMP_CHAT_ID":                strconv.FormatInt(GlobalConfig.DumpChatID, 10),
 		"LEECH_LOG_ID":                 strconv.FormatInt(GlobalConfig.LeechLogID, 10),
 		"STATUS_LIMIT":                 strconv.Itoa(GlobalConfig.StatusLimit),
 		"STATUS_UPDATE_INTERVAL":       strconv.Itoa(GlobalConfig.StatusUpdateInterval),
@@ -472,5 +557,7 @@ func GetConfigMap() map[string]string {
 		"SHORTENER_API":                GlobalConfig.ShortenerAPI,
 		"SHORTENER_ENABLED":            strconv.FormatBool(GlobalConfig.ShortenerEnabled),
 		"TOKEN_TIMEOUT":                strconv.FormatInt(GlobalConfig.TokenTimeout, 10),
+		"UPSTREAM_REPO":                GlobalConfig.UpstreamRepo,
+		"UPSTREAM_BRANCH":              GlobalConfig.UpstreamBranch,
 	}
 }

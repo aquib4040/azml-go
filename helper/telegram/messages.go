@@ -400,19 +400,6 @@ func (m *MessageSender) SendMessageWithButtons(ctx context.Context, peer tg.Inpu
 	if btn == nil {
 		return m.SendMessage(ctx, peer, text, replyToID, nil)
 	}
-
-	botToken := getBotToken()
-	chatID := PeerToChatID(peer)
-	if botToken != "" && chatID != 0 && btn.HasStyle() {
-		msgID, err := m.sendBotAPIMessage(ctx, botToken, chatID, text, replyToID, btn, cols)
-		if err == nil && msgID > 0 {
-			return msgID, nil
-		}
-		if err != nil {
-			log.Printf("[AZML-Go Bot API] SendMessage failed: %v, falling back to MTProto", err)
-		}
-	}
-
 	return m.SendMessage(ctx, peer, text, replyToID, btn.BuildMenu(cols))
 }
 
@@ -423,23 +410,6 @@ func (m *MessageSender) EditMessageWithButtons(ctx context.Context, peer tg.Inpu
 	if btn == nil {
 		return m.EditMessage(ctx, peer, msgID, text, nil)
 	}
-
-	botToken := getBotToken()
-	chatID := PeerToChatID(peer)
-	if botToken != "" && chatID != 0 && btn.HasStyle() {
-		err := m.editBotAPIMessage(ctx, botToken, chatID, msgID, text, btn, cols)
-		if err == nil {
-			return nil
-		}
-		if strings.Contains(strings.ToLower(err.Error()), "message to edit not found") {
-			return err
-		}
-		if strings.Contains(strings.ToLower(err.Error()), "too many requests") {
-			return err
-		}
-		log.Printf("[AZML-Go Bot API] EditMessage failed: %v, falling back to MTProto", err)
-	}
-
 	return m.EditMessage(ctx, peer, msgID, text, btn.BuildMenu(cols))
 }
 

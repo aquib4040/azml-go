@@ -17,11 +17,13 @@ import (
 )
 
 type DatabaseManager struct {
-	client    *mongo.Client
-	usersCol  *mongo.Collection
-	isMongo   bool
-	localFile string
-	fileLock  sync.Mutex
+	client            *mongo.Client
+	usersCol          *mongo.Collection
+	settingsCol       *mongo.Collection
+	isMongo           bool
+	localFile         string
+	localSettingsFile string
+	fileLock          sync.Mutex
 }
 
 var (
@@ -29,11 +31,16 @@ var (
 	once sync.Once
 )
 
+func GetDB() *DatabaseManager {
+	return DB
+}
+
 func InitDB() *DatabaseManager {
 	once.Do(func() {
 		cfg := config.Get()
 		mgr := &DatabaseManager{
-			localFile: "user_data.json",
+			localFile:         "user_data.json",
+			localSettingsFile: "bot_settings.json",
 		}
 
 		if cfg.DatabaseURL != "" {
@@ -45,6 +52,7 @@ func InitDB() *DatabaseManager {
 			if err == nil && client.Ping(ctx, nil) == nil {
 				mgr.client = client
 				mgr.usersCol = client.Database("azml").Collection("users")
+				mgr.settingsCol = client.Database("azml").Collection("settings")
 				mgr.isMongo = true
 				log.Println("[DB] Connected to MongoDB successfully")
 			} else {
@@ -53,7 +61,7 @@ func InitDB() *DatabaseManager {
 		}
 
 		if !mgr.isMongo {
-			log.Println("[DB] Using local JSON storage for user persistence")
+			log.Println("[DB] Using local JSON storage for user & bot persistence")
 		}
 
 		DB = mgr
@@ -131,4 +139,115 @@ func (d *DatabaseManager) SaveUser(u *types.UserSettings) error {
 		return err
 	}
 	return os.WriteFile(d.localFile, newData, 0644)
+}
+
+func (d *DatabaseManager) LoadAllBotSettings() (map[string]string, error) {
+	if d == nil {
+		return nil, nil
+	}
+	if d.isMongo {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		cursor, err := d.settingsCol.Find(ctx, bson.M{})
+		if err != nil {
+			return nil, err
+		}
+		defer cursor.Close(ctx)
+
+		settings := make(map[string]string)
+		for cursor.Next(ctx) {
+			var doc struct {
+				Key   string `bson:"_id"`
+				Value string `bson:"value"`
+			}
+			if err := cursor.Decode(&doc); err == nil && doc.Key != "" {
+				settings[doc.Key] = doc.Value
+			}
+		}
+		return settings, cursor.Err()
+	}
+
+	d.fileLock.Lock()
+	defer d.fileLock.Unlock()
+
+	data, err := os.ReadFile(d.localSettingsFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var settings map[string]string
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func (d *DatabaseManager) SaveBotSetting(key, val string) error {
+	if d == nil {
+		return nil
+	}
+	if d.isMongo {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		opts := options.Update().SetUpsert(true)
+		_, err := d.settingsCol.UpdateOne(
+			ctx,
+			bson.M{"_id": key},
+			bson.M{"$set": bson.M{"value": val, "updated_at": time.Now()}},
+			opts,
+		)
+		return err
+	}
+
+	d.fileLock.Lock()
+	defer d.fileLock.Unlock()
+
+	settings := make(map[string]string)
+	data, err := os.ReadFile(d.localSettingsFile)
+	if err == nil {
+		_ = json.Unmarshal(data, &settings)
+	}
+
+	if val == "" {
+		delete(settings, key)
+	} else {
+		settings[key] = val
+	}
+
+	newData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(d.localSettingsFile, newData, 0644)
+}
+
+func (d *DatabaseManager) GetBotSetting(key string) (string, error) {
+	if d == nil {
+		return "", nil
+	}
+	if d.isMongo {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var doc struct {
+			Key   string `bson:"_id"`
+			Value string `bson:"value"`
+		}
+		err := d.settingsCol.FindOne(ctx, bson.M{"_id": key}).Decode(&doc)
+		if err != nil {
+			return "", err
+		}
+		return doc.Value, nil
+	}
+
+	settings, err := d.LoadAllBotSettings()
+	if err != nil {
+		return "", err
+	}
+	return settings[key], nil
 }

@@ -75,6 +75,31 @@ func main() {
 
 	// Initialize Database (MongoDB or local JSON fallback)
 	ext.InitDB()
+	if db := ext.GetDB(); db != nil {
+		if dbSettings, err := db.LoadAllBotSettings(); err == nil && len(dbSettings) > 0 {
+			for k, v := range dbSettings {
+				if v != "" {
+					_ = config.UpdateConfigVar(k, v)
+				}
+			}
+			log.Printf("[DB] Restored %d persistent setting(s) from database", len(dbSettings))
+		}
+		// Ensure default repository and branch are persisted in DB
+		if repo, _ := db.GetBotSetting("UPSTREAM_REPO"); repo == "" {
+			_ = db.SaveBotSetting("UPSTREAM_REPO", "https://github.com/aquib4040/azml-go")
+		}
+		if branch, _ := db.GetBotSetting("UPSTREAM_BRANCH"); branch == "" {
+			_ = db.SaveBotSetting("UPSTREAM_BRANCH", "main")
+		}
+	}
+	config.SetOnConfigVarUpdated(func(key, val string) {
+		if db := ext.GetDB(); db != nil {
+			if err := db.SaveBotSetting(key, val); err != nil {
+				log.Printf("[DB] Error saving setting %s to DB: %v", key, err)
+			}
+		}
+	})
+	cfg = config.Get()
 	ext.LoadShorteners()
 
 	// Ensure Aria2c is started with 16 connections
@@ -117,6 +142,11 @@ func main() {
 	cancelMod := modules.NewCancelModule(sender, userMap, statusMod)
 	settingsMod := modules.NewSettingsModule(app.GetRawAPI(), sender, userMap)
 	botSetMod := modules.NewBotSettingsModule(sender, userMap)
+	botSetMod.SetUserSessionReloader(app.ReloadUserSession)
+	botSetMod.SetUploader(uploader)
+	botSetMod.SetLeechModule(leechMod)
+	app.SetUserRawAPIUpdater(leechMod.SetUserRawAPI)
+
 	authMod := modules.NewAuthorizeModule(sender, userMap)
 	helpMod := modules.NewHelpModule(sender, userMap, startTime)
 	speedMod := modules.NewSpeedtestModule(sender)

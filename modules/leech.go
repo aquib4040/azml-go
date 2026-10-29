@@ -55,6 +55,14 @@ func (m *LeechModule) SetSessionPool(sessPool *pool.SessionPool, dumpChatID int6
 	m.dumpChatID = dumpChatID
 }
 
+func (m *LeechModule) SetUserRawAPI(userRawAPI *tg.Client) {
+	m.userRawAPI = userRawAPI
+}
+
+func (m *LeechModule) SetDumpChatID(dumpChatID int64) {
+	m.dumpChatID = dumpChatID
+}
+
 func (m *LeechModule) HandleLeech(ctx context.Context, peer tg.InputPeerClass, msg *types.MessageContext, isZip, isUnzip bool) {
 	cfg := config.Get()
 
@@ -1241,10 +1249,11 @@ func (m *LeechModule) processLeechPipeline(peer tg.InputPeerClass, msg *types.Me
 				ThumbPath:  thumbPath,
 				CoverPath:  coverPath,
 				AsDoc:      asDoc,
-				DumpChatID: dumpID,
-				LogChatID:  cfg.LeechLogID,
-				UserID:     msg.UserID,
-				BotPM:      botPM,
+				DumpChatID:     dumpID,
+				LogChatID:      cfg.LeechLogID,
+				UserID:         msg.UserID,
+				UserAccessHash: telegram.GetUserAccessHash(msg.UserID),
+				BotPM:          botPM,
 				IsPremium:  isPremium,
 				GID:        taskUID,
 				OnProgress: func(curr, total int64, speed float64, eta string) {

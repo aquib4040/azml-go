@@ -248,10 +248,25 @@ func (m *HelpModule) HandleRestart(ctx context.Context, peer tg.InputPeerClass, 
 		_, _ = m.sender.SendMessage(ctx, peer, "Only Owner can restart the bot!", msg.MessageID, nil)
 		return
 	}
-	msgID, _ := m.sender.SendMessage(ctx, peer, "• <i>Restarting AZML-Go...</i>", msg.MessageID, nil)
-	if msgID > 0 {
-		_ = os.WriteFile(".restartmsg", []byte(fmt.Sprintf("%d %d", msg.ChatID, msgID)), 0644)
+
+	statusMsgID, _ := m.sender.SendMessage(ctx, peer, "• <i>Initializing AZML-Go Update & Restart engine...</i>", msg.MessageID, nil)
+
+	onStatus := func(text string) {
+		if statusMsgID > 0 {
+			_ = m.sender.EditMessage(ctx, peer, statusMsgID, text, nil)
+		} else {
+			_, _ = m.sender.SendMessage(ctx, peer, text, msg.MessageID, nil)
+		}
 	}
-	time.Sleep(500 * time.Millisecond)
-	os.Exit(0)
+
+	recordRestartMsg := func() error {
+		if statusMsgID > 0 {
+			return os.WriteFile(".restartmsg", []byte(fmt.Sprintf("%d %d", msg.ChatID, statusMsgID)), 0644)
+		}
+		return nil
+	}
+
+	go func() {
+		_ = ext.UpdateAndRestart(context.Background(), onStatus, recordRestartMsg)
+	}()
 }
