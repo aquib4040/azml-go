@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -23,7 +25,34 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+type istLogWriter struct {
+	out io.Writer
+	loc *time.Location
+}
+
+func (w *istLogWriter) Write(p []byte) (n int, err error) {
+	now := time.Now().In(w.loc).Format("2006/01/02 15:04:05 IST")
+	return fmt.Fprintf(w.out, "%s %s", now, p)
+}
+
+func setupISTLogging() {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.FixedZone("IST", 5*3600+30*60)
+	}
+	time.Local = loc
+	_ = os.Setenv("TZ", "Asia/Kolkata")
+
+	log.SetFlags(0)
+	log.SetOutput(&istLogWriter{
+		out: os.Stdout,
+		loc: loc,
+	})
+}
+
 func setupEnvironment() {
+	setupISTLogging()
+
 	currentPath := os.Getenv("PATH")
 	aptBinDirs := []string{"/app/.apt/usr/bin", "/app/.apt/bin", "/usr/local/bin", "/usr/bin", "/bin"}
 	for _, dir := range aptBinDirs {

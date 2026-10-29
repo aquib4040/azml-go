@@ -12,11 +12,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /usr/local/bin/azml-go
 FROM aquib4040/azmlgo:latest
 
 ENV GODEBUG="madvdontneed=1"
+ENV TZ="Asia/Kolkata"
 
 WORKDIR /usr/src/app
 
-# Install git, speedtest-cli, curl, and ca-certificates
-RUN apt-get update && apt-get install -y --no-install-recommends git speedtest-cli curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install git, speedtest-cli, curl, ca-certificates, and tzdata for IST time in container
+RUN apt-get update && apt-get install -y --no-install-recommends git speedtest-cli curl ca-certificates tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the exact Go compiler from builder stage (no re-downloading required)
 COPY --from=builder /usr/local/go /usr/local/go
