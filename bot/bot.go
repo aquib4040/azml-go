@@ -36,7 +36,7 @@ type BotApp struct {
 	rawAPI      *tg.Client
 	userClient  *td.Client
 	userRawAPI  *tg.Client
-	userPool    td.CloseInvoker
+	userPool    *telegram.UserClientPool
 	userCancel  context.CancelFunc
 	userMu      sync.RWMutex
 	userUpdater func(userRawAPI *tg.Client)
@@ -264,13 +264,13 @@ func (b *BotApp) ReloadUserSession(ctx context.Context, sessionStr string) (stri
 
 	sessionStr = strings.TrimSpace(sessionStr)
 	if sessionStr == "" {
+		if b.userPool != nil {
+			b.userPool.Close()
+			b.userPool = nil
+		}
 		if b.userCancel != nil {
 			b.userCancel()
 			b.userCancel = nil
-		}
-		if b.userPool != nil {
-			_ = b.userPool.Close()
-			b.userPool = nil
 		}
 		b.userClient = nil
 		b.userRawAPI = nil
@@ -333,33 +333,16 @@ func (b *BotApp) ReloadUserSession(ctx context.Context, sessionStr string) (stri
 			return "", 0, false, fmt.Errorf("session login failed: %w", res.err)
 		}
 
+		if b.userPool != nil {
+			b.userPool.Close()
+			b.userPool = nil
+		}
 		if b.userCancel != nil {
 			b.userCancel()
 		}
-		if b.userPool != nil {
-			_ = b.userPool.Close()
-			b.userPool = nil
-		}
 		b.userCancel = uCancel
 		b.userClient = newUserClient
-
-		// Create a 16-connection MTProto pool to bypass single TCP socket bottleneck
-		userPool, poolErr := newUserClient.Pool(16)
-		if poolErr == nil {
-			b.userPool = userPool
-			b.userRawAPI = tg.NewClient(userPool)
-			log.Printf("[AZML-Go User Client] Activated multi-connection MTProto pool (16 parallel TCP sockets)")
-		} else {
-			log.Printf("[AZML-Go User Client] Warning: failed to create 16-connection pool (%v); fallback to primary API", poolErr)
-			b.userRawAPI = newUserClient.API()
-		}
-
-		if b.uploader != nil {
-			b.uploader.SetUserClient(b.userRawAPI)
-		}
-		if b.userUpdater != nil {
-			b.userUpdater(b.userRawAPI)
-		}
+		b.userRawAPI = newUserClient.API()
 
 		uname := res.user.Username
 		if uname == "" {
@@ -374,6 +357,59 @@ func (b *BotApp) ReloadUserSession(ctx context.Context, sessionStr string) (stri
 		} else {
 			log.Printf("[AZML-Go User Client] Activated User Session as @%s (ID: %d, NON-PREMIUM: Max Split 1.91GB)", uname, res.user.ID)
 		}
+
+		// Initialize parallel client pool (matching WZGram Premium 14-session pool)
+		poolSize := 14
+		if !isPrem {
+			poolSize = 8
+		}
+		sData, _ := telegram.ParseSessionData(ctx, sessionStr)
+		if sData != nil {
+			uPool, pErr := telegram.StartUserClientPool(uCtx, cfg.TelegramAPI, cfg.TelegramHash, sData, b.userRawAPI, poolSize)
+			if pErr == nil && uPool != nil {
+				b.userPool = uPool
+				if b.uploader != nil {
+					b.uploader.SetUserClientPool(b.userRawAPI, uPool.Clients())
+				}
+			} else {
+				if b.uploader != nil {
+					b.uploader.SetUserClient(b.userRawAPI)
+				}
+			}
+		} else {
+			if b.uploader != nil {
+				b.uploader.SetUserClient(b.userRawAPI)
+			}
+		}
+
+		if b.userUpdater != nil {
+			b.userUpdater(b.userRawAPI)
+		}
+
+		// Proactively grab & cache AccessHash for DUMP_CHAT_ID and LEECH_LOG_ID for future uploads
+		go func(rawAPI *tg.Client) {
+			preCtx, preCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer preCancel()
+			currCfg := config.Get()
+			if currCfg == nil || rawAPI == nil {
+				return
+			}
+			if currCfg.DumpChatID != 0 {
+				hash := telegram.ResolveChannelAccessHash(preCtx, rawAPI, currCfg.DumpChatID)
+				if hash != 0 {
+					log.Printf("[AZML-Go User Client] Successfully grabbed & cached AccessHash for DUMP_CHAT_ID %d (AccessHash: %d)", currCfg.DumpChatID, hash)
+				} else {
+					log.Printf("[AZML-Go User Client] Warning: Could not resolve AccessHash for DUMP_CHAT_ID %d during pre-warm", currCfg.DumpChatID)
+				}
+			}
+			if currCfg.LeechLogID != 0 && currCfg.LeechLogID != currCfg.DumpChatID {
+				lHash := telegram.ResolveChannelAccessHash(preCtx, rawAPI, currCfg.LeechLogID)
+				if lHash != 0 {
+					log.Printf("[AZML-Go User Client] Successfully grabbed & cached AccessHash for LEECH_LOG_ID %d (AccessHash: %d)", currCfg.LeechLogID, lHash)
+				}
+			}
+		}(b.userRawAPI)
+
 		return uname, res.user.ID, isPrem, nil
 
 	case <-time.After(20 * time.Second):
@@ -924,6 +960,28 @@ func (b *BotApp) Start(ctx context.Context) error {
 
 		// Trigger startup notification
 		go b.sendStartupNotification(ctx)
+
+		// Pre-warm and cache Channel AccessHash for Main Bot
+		go func() {
+			preCtx, preCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer preCancel()
+			currCfg := config.Get()
+			if currCfg == nil || b.rawAPI == nil {
+				return
+			}
+			if currCfg.DumpChatID != 0 {
+				dHash := telegram.ResolveChannelAccessHash(preCtx, b.rawAPI, currCfg.DumpChatID)
+				if dHash != 0 {
+					log.Printf("[AZML-Go Bot Client] Successfully pre-warmed & cached AccessHash for DUMP_CHAT_ID %d (AccessHash: %d)", currCfg.DumpChatID, dHash)
+				}
+			}
+			if currCfg.LeechLogID != 0 && currCfg.LeechLogID != currCfg.DumpChatID {
+				lHash := telegram.ResolveChannelAccessHash(preCtx, b.rawAPI, currCfg.LeechLogID)
+				if lHash != 0 {
+					log.Printf("[AZML-Go Bot Client] Successfully pre-warmed & cached AccessHash for LEECH_LOG_ID %d (AccessHash: %d)", currCfg.LeechLogID, lHash)
+				}
+			}
+		}()
 
 		<-ctx.Done()
 		return ctx.Err()

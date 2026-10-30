@@ -91,25 +91,29 @@ func deleteMessageViaBotAPI(botToken string, chatID int64, msgID int) bool {
 }
 
 type TelegramUploader struct {
-	botClient  *tg.Client
-	botUp      *uploader.Uploader
-	userClient *tg.Client
-	userUp     *uploader.Uploader
-	sessPool   *pool.SessionPool
-	dumpChatID int64
+	botClient   *tg.Client
+	botUp       *uploader.Uploader
+	userClient  *tg.Client
+	userClients []*tg.Client
+	userUp      *uploader.Uploader
+	sessPool    *pool.SessionPool
+	dumpChatID  int64
 }
 
 func NewTelegramUploader(botClient *tg.Client, userClient *tg.Client) *TelegramUploader {
 	botUp := uploader.NewUploader(botClient).WithPartSize(512 * 1024).WithThreads(8)
 	var userUp *uploader.Uploader
+	var userClients []*tg.Client
 	if userClient != nil {
+		userClients = []*tg.Client{userClient}
 		userUp = uploader.NewUploader(userClient).WithPartSize(512 * 1024).WithThreads(16)
 	}
 	return &TelegramUploader{
-		botClient:  botClient,
-		botUp:      botUp,
-		userClient: userClient,
-		userUp:     userUp,
+		botClient:   botClient,
+		botUp:       botUp,
+		userClient:  userClient,
+		userClients: userClients,
+		userUp:      userUp,
 	}
 }
 
@@ -121,7 +125,25 @@ func (u *TelegramUploader) SetSessionPool(sessPool *pool.SessionPool, dumpChatID
 func (u *TelegramUploader) SetUserClient(userClient *tg.Client) {
 	u.userClient = userClient
 	if userClient != nil {
+		u.userClients = []*tg.Client{userClient}
 		u.userUp = uploader.NewUploader(userClient).WithPartSize(512 * 1024).WithThreads(16)
+	} else {
+		u.userClients = nil
+		u.userUp = nil
+	}
+}
+
+func (u *TelegramUploader) SetUserClientPool(primary *tg.Client, clients []*tg.Client) {
+	u.userClient = primary
+	if len(clients) > 0 {
+		u.userClients = clients
+	} else if primary != nil {
+		u.userClients = []*tg.Client{primary}
+	} else {
+		u.userClients = nil
+	}
+	if primary != nil {
+		u.userUp = uploader.NewUploader(primary).WithPartSize(512 * 1024).WithThreads(16)
 	} else {
 		u.userUp = nil
 	}
@@ -257,7 +279,7 @@ func (c *uploadFloodCoordinator) HandleFloodWait(waitDur time.Duration, partInde
 	}
 }
 
-func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int64, partIndex int, totalParts int, bytes []byte, floodCoord *uploadFloodCoordinator) error {
+func saveBigFilePartWithRetry(ctx context.Context, clients []*tg.Client, workerIdx int, fileID int64, partIndex int, totalParts int, bytes []byte, floodCoord *uploadFloodCoordinator) error {
 	const maxAttempts = 25
 	attempt := 0
 	floodWaitAttempts := 0
@@ -276,8 +298,13 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 			}
 		}
 
+		clientToUse := clients[0]
+		if len(clients) > 0 {
+			clientToUse = clients[(workerIdx+attempt)%len(clients)]
+		}
+
 		partCtx, partCancel := context.WithTimeout(ctx, 35*time.Second)
-		_, err := client.UploadSaveBigFilePart(partCtx, &tg.UploadSaveBigFilePartRequest{
+		_, err := clientToUse.UploadSaveBigFilePart(partCtx, &tg.UploadSaveBigFilePartRequest{
 			FileID:         fileID,
 			FilePart:       partIndex,
 			FileTotalParts: totalParts,
@@ -317,10 +344,6 @@ func saveBigFilePartWithRetry(ctx context.Context, client *tg.Client, fileID int
 		if isTransientUploadError(err) {
 			jitter := time.Duration(rand.Intn(250)) * time.Millisecond
 			sleepDuration := backoff + jitter
-			if attempt > 2 {
-				log.Printf("[AZML-Go Uploader] Warning: part %d/%d (attempt %d/%d) transient error: %v. Retrying in %v...",
-					partIndex, totalParts, attempt, maxAttempts, err, sleepDuration.Round(time.Millisecond))
-			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -573,11 +596,18 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 		var firstErr error
 
 		isUserUpload := clientToUse == u.userClient && u.userClient != nil
+		uploadClients := []*tg.Client{clientToUse}
 		numWorkers := 8
 		maxWorkers := 8
 		if isUserUpload {
-			numWorkers = 16
-			maxWorkers = 16
+			if len(u.userClients) > 0 {
+				uploadClients = u.userClients
+			}
+			numWorkers = len(uploadClients)
+			if numWorkers < 14 {
+				numWorkers = 14
+			}
+			maxWorkers = 20
 		}
 		if envVal := os.Getenv("UPLOAD_THREADS"); envVal != "" {
 			if val, pErr := strconv.Atoi(envVal); pErr == nil && val > 0 {
@@ -629,7 +659,7 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 						return
 					}
 
-					saveErr := saveBigFilePartWithRetry(ctx, clientToUse, fileID, int(partIndex), int(totalParts), workerBuf[:n], floodCoord)
+					saveErr := saveBigFilePartWithRetry(ctx, uploadClients, workerID, fileID, int(partIndex), int(totalParts), workerBuf[:n], floodCoord)
 					if saveErr != nil {
 						errOnce.Do(func() {
 							firstErr = fmt.Errorf("UploadSaveBigFilePart failed for part %d: %w", partIndex, saveErr)
@@ -862,15 +892,21 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			time.Sleep(waitDur + 500*time.Millisecond)
 			continue
 		}
-		// Fallback to command peer if sending to preferred peer failed (only for Main Bot)
-		if uploadBotSession == nil && uploadPeer != peer && attempt == 0 {
-			log.Printf("[AZML-Go Uploader] Upload to preferred peer failed (%v), falling back to command peer", sendErr)
-			uploadPeer = peer
-			actualDestChatID = fromChatID
-			req.Peer = peer
+		errStr := sendErr.Error()
+
+		// Inter-DC or internal server errors (500) during cross-DC media linking:
+		// When uploading files across datacenters (e.g., DC1 session to DC5 channel),
+		// Telegram can return INTERDC_CALL_ERROR while establishing cross-DC media references.
+		// Retrying the same target channel with exponential backoff resolves this seamlessly.
+		if strings.Contains(errStr, "INTERDC_CALL_ERROR") || strings.Contains(errStr, "rpc error code 500") ||
+			strings.Contains(errStr, "INTERNAL") || strings.Contains(errStr, "RPC_CALL_FAIL") {
+			backoff := time.Duration((attempt+1)*3) * time.Second
+			log.Printf("[AZML-Go Uploader] Inter-DC / Server error on MessagesSendMedia (%v) (attempt %d/10). Retrying to target peer in %v...", sendErr, attempt+1, backoff)
+			time.Sleep(backoff)
 			continue
 		}
-		errStr := sendErr.Error()
+
+		// Transient network or connection disconnects
 		if strings.Contains(errStr, "engine was closed") || strings.Contains(errStr, "engine forcibly closed") ||
 			strings.Contains(errStr, "connection") || strings.Contains(errStr, "reset") ||
 			strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") ||
@@ -879,6 +915,19 @@ func (u *TelegramUploader) UploadFile(ctx context.Context, peer tg.InputPeerClas
 			time.Sleep(2 * time.Second)
 			continue
 		}
+
+		// Fallback to command peer ONLY for Main Bot with explicit permission rejection, NEVER for user client or transient errors
+		if uploadBotSession == nil && clientToUse == u.botClient && uploadPeer != peer && attempt < 2 {
+			if strings.Contains(errStr, "CHAT_ADMIN_REQUIRED") || strings.Contains(errStr, "CHAT_WRITE_FORBIDDEN") ||
+				strings.Contains(errStr, "CHANNEL_PRIVATE") {
+				log.Printf("[AZML-Go Uploader] Upload to preferred peer failed with permission error (%v), falling back to command peer", sendErr)
+				uploadPeer = peer
+				actualDestChatID = fromChatID
+				req.Peer = peer
+				continue
+			}
+		}
+
 		break
 	}
 	if sendErr != nil {

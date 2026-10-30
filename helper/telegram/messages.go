@@ -70,8 +70,14 @@ func ResolveChannelAccessHash(ctx context.Context, client *tg.Client, chatID int
 		return 0
 	}
 
-	// 1. Try MessagesGetChats first (does not require AccessHash)
-	if chats, err := client.MessagesGetChats(ctx, []int64{raw}); err == nil && chats != nil {
+	// 1. Try ChannelsGetChannels first with AccessHash: 0 (works directly for channels and supergroups)
+	chats, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{
+			ChannelID:  raw,
+			AccessHash: 0,
+		},
+	})
+	if err == nil && chats != nil {
 		var chatList []tg.ChatClass
 		switch c := chats.(type) {
 		case *tg.MessagesChats:
@@ -87,14 +93,8 @@ func ResolveChannelAccessHash(ctx context.Context, client *tg.Client, chatID int
 		}
 	}
 
-	// 2. Try ChannelsGetChannels as fallback
-	chats, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{
-		&tg.InputChannel{
-			ChannelID:  raw,
-			AccessHash: 0,
-		},
-	})
-	if err == nil && chats != nil {
+	// 2. Try MessagesGetChats as fallback for legacy basic groups
+	if chats, err := client.MessagesGetChats(ctx, []int64{raw}); err == nil && chats != nil {
 		var chatList []tg.ChatClass
 		switch c := chats.(type) {
 		case *tg.MessagesChats:

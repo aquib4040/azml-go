@@ -14,6 +14,16 @@ import (
 	"github.com/gotd/td/telegram/dcs"
 )
 
+// ParseSessionData parses sessionStr and returns raw *session.Data
+func ParseSessionData(ctx context.Context, sessionStr string) (*session.Data, error) {
+	storage, err := ParseSessionString(ctx, sessionStr)
+	if err != nil {
+		return nil, err
+	}
+	loader := session.Loader{Storage: storage}
+	return loader.Load(ctx)
+}
+
 // ParseSessionString parses Pyrogram (v1, v2), Pyrofork, Pyrotgfork, Telethon, or gotd session strings
 func ParseSessionString(ctx context.Context, sessionStr string) (session.Storage, error) {
 	sessionStr = strings.TrimSpace(sessionStr)
